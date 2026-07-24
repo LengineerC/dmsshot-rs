@@ -1,0 +1,9 @@
+[package]
+name = "dmsshot-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dashmap = "6.2.1"
+nix = {version = "0.31.3", features = ["socket", "uio"]}
+thiserror = "2.0.19"
