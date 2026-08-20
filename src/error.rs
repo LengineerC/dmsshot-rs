@@ -1,0 +1,41 @@
+use std::{io, path::PathBuf};
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("niri is not running (NIRI_SOCKET is not set)")]
+    NotNiri,
+    #[error("niri IPC: {0}")]
+    Niri(String),
+    #[error("Wayland: {0}")]
+    Wayland(String),
+    #[error("required Wayland protocol is unavailable: {0}")]
+    MissingProtocol(&'static str),
+    #[error("output {0:?} was not found")]
+    OutputNotFound(String),
+    #[error("output name is required (use `dmsshot output NAME` or --output NAME)")]
+    MissingOutputName,
+    #[error("no outputs are available")]
+    NoOutputs,
+    #[error("capture was rejected by the compositor")]
+    CaptureFailed,
+    #[error("invalid capture buffer: {0}")]
+    InvalidBuffer(String),
+    #[error("scroll capture does not support rotated outputs")]
+    RotatedScroll,
+    #[error("image is too large")]
+    ImageTooLarge,
+    #[error("unable to create output directory {path}: {source}")]
+    CreateOutputDir { path: PathBuf, source: io::Error },
+    #[error("unable to write {path}: {source}")]
+    WriteFile { path: PathBuf, source: io::Error },
+    #[error("clipboard: {0}")]
+    Clipboard(String),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Image(#[from] image::ImageError),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
