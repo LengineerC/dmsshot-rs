@@ -253,6 +253,7 @@ dependencies = [
  "chrono",
  "clap",
  "image",
+ "libc",
  "serde",
  "serde_json",
  "smithay-client-toolkit",

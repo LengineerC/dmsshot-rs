@@ -13,10 +13,17 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::{app::Application, cli::Cli};
+use crate::{
+    app::Application,
+    cli::{Cli, Command},
+};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Some(Command::NotificationAction { path, copied }) = cli.command.as_ref() {
+        integration::run_notification_listener(path, *copied);
+        return ExitCode::SUCCESS;
+    }
     let json = cli.json;
     match Application::new(cli).and_then(Application::run) {
         Ok(()) => ExitCode::SUCCESS,

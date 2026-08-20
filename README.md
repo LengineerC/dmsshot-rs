@@ -19,7 +19,8 @@ cargo build --release
 
 The resulting binary is `target/release/dmsshot-rs`. Building requires Rust 1.88 or newer, Wayland
 development files, `pkg-config`, and `libxkbcommon`. At runtime, `wl-copy` provides persistent
-Wayland clipboard ownership and `notify-send` sends the completion notification.
+Wayland clipboard ownership, `notify-send` sends the actionable completion notification, and
+`xdg-open` opens captured images or their containing folders.
 
 ## Usage
 
@@ -37,7 +38,9 @@ Run `dmsshot-rs --help` for image format, destination, cursor, JSON, and stdout 
 uses Enter or Space to confirm, Escape to cancel, `P` to toggle the captured pointer, and Shift to
 constrain a drag to a square. Scroll mode finishes with Enter or the Done button. Successful file
 captures are copied and notified by default; use `--no-clipboard` or `--no-notify` to disable either
-integration. Binary `--stdout` output remains free of clipboard and notification side effects.
+integration. Left-clicking a completion notification opens the captured image; its Open Folder
+action opens the destination directory. Binary `--stdout` output remains free of clipboard and
+notification side effects.
 
 Unless `--dir` or `$DMS_SCREENSHOT_DIR` specifies another destination, screenshots are saved in the
 user's XDG Pictures directory under `Screenshots` (normally `~/Pictures/Screenshots`). The directory

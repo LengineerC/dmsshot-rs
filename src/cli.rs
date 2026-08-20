@@ -63,6 +63,13 @@ pub enum Command {
     },
     /// List available outputs.
     List,
+    /// Internal notification action listener.
+    #[command(hide = true)]
+    NotificationAction {
+        path: PathBuf,
+        #[arg(long)]
+        copied: bool,
+    },
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -138,6 +145,8 @@ impl Cli {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::Parser;
 
     use super::{Cli, Command, OutputFormat};
@@ -164,5 +173,28 @@ mod tests {
     fn jpeg_alias_is_accepted() {
         let cli = Cli::try_parse_from(["dmsshot", "--format", "jpeg", "full"]).unwrap();
         assert_eq!(cli.format, OutputFormat::Jpg);
+    }
+
+    #[test]
+    fn notification_listener_is_hidden_but_parseable() {
+        let cli = Cli::try_parse_from([
+            "dmsshot",
+            "notification-action",
+            "/tmp/example.png",
+            "--copied",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.command,
+            Some(Command::NotificationAction {
+                path: PathBuf::from("/tmp/example.png"),
+                copied: true,
+            })
+        );
+
+        let help = Cli::try_parse_from(["dmsshot", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(!help.contains("notification-action"));
     }
 }

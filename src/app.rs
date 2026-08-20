@@ -65,6 +65,7 @@ impl Application {
             Command::Region => self.capture_interactive(false, 45)?,
             Command::Scroll { interval } => self.capture_interactive(true, interval)?,
             Command::List => unreachable!(),
+            Command::NotificationAction { .. } => unreachable!(),
         };
 
         let Some(image) = image else {
