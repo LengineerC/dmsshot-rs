@@ -1,6 +1,7 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     fs,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -1021,55 +1022,192 @@ impl Default for Theme {
 }
 impl Theme {
     fn load() -> Self {
-        let Some(home) = std::env::var_os("HOME") else {
-            return Self::default();
-        };
-        let cache = std::env::var_os("XDG_CACHE_HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from(home).join(".cache"));
-        let Ok(value) = fs::read_to_string(cache.join("DankMaterialShell/dms-colors.json")) else {
-            return Self::default();
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&value) else {
-            return Self::default();
-        };
-        let mode = if is_light_mode() { "light" } else { "dark" };
-        let colors = &value["colors"][mode];
-        Self {
-            background: parse_color(colors["surface"].as_str())
-                .map(|rgb| [rgb[0], rgb[1], rgb[2], 245])
-                .unwrap_or(Self::default().background),
-            text: parse_color(colors["on_surface"].as_str())
-                .map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
-                .unwrap_or(Self::default().text),
-            accent: parse_color(colors["primary"].as_str())
-                .map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
-                .unwrap_or(Self::default().accent),
-        }
+        gtk_theme_colors().unwrap_or_default()
     }
 }
 
-fn is_light_mode() -> bool {
+fn gtk_theme_colors() -> Option<Theme> {
+    let mut definitions = HashMap::new();
+    let mut visited = HashSet::new();
+    for path in gtk_css_paths() {
+        load_gtk_css(&path, &mut definitions, &mut visited);
+    }
+    let background = resolve_first(
+        &definitions,
+        &["window_bg_color", "theme_bg_color", "view_bg_color"],
+    )?;
+    let text = resolve_first(
+        &definitions,
+        &["window_fg_color", "theme_fg_color", "view_fg_color"],
+    )?;
+    let accent = resolve_first(
+        &definitions,
+        &["accent_color", "accent_bg_color", "theme_selected_bg_color"],
+    )?;
+    Some(Theme {
+        background: [background[0], background[1], background[2], 245],
+        text: [text[0], text[1], text[2], 255],
+        accent: [accent[0], accent[1], accent[2], 255],
+    })
+}
+
+fn gtk_css_paths() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let theme_name = std::env::var("GTK_THEME")
+        .ok()
+        .or_else(|| gsettings("gtk-theme"))
+        .map(|name| name.split(':').next().unwrap_or(&name).to_owned());
+    let mut paths = Vec::new();
+    if let Some(theme) = theme_name {
+        let mut data_roots = vec![
+            PathBuf::from("/usr/local/share"),
+            PathBuf::from("/usr/share"),
+        ];
+        if let Some(value) = std::env::var_os("XDG_DATA_DIRS") {
+            data_roots.extend(std::env::split_paths(&value));
+        }
+        if let Some(root) = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|path| path.join(".local/share")))
+        {
+            data_roots.push(root);
+        }
+        if let Some(home) = &home {
+            data_roots.push(home.join(".themes"));
+        }
+        for root in data_roots {
+            let theme_root = if root.file_name().is_some_and(|name| name == ".themes") {
+                root.join(&theme)
+            } else {
+                root.join("themes").join(&theme)
+            };
+            paths.push(theme_root.join("gtk-3.0/gtk.css"));
+            paths.push(theme_root.join("gtk-4.0/gtk.css"));
+        }
+    }
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.map(|path| path.join(".config")));
+    if let Some(config) = config {
+        for version in ["gtk-3.0", "gtk-4.0"] {
+            paths.push(config.join(version).join("gtk.css"));
+            paths.push(config.join(version).join("colors.css"));
+        }
+    }
+    paths
+}
+
+fn gsettings(key: &str) -> Option<String> {
     std::process::Command::new("gsettings")
-        .args(["get", "org.gnome.desktop.interface", "color-scheme"])
+        .args(["get", "org.gnome.desktop.interface", key])
         .output()
         .ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
-        .is_some_and(|value| matches!(value.trim(), "'prefer-light'" | "'default'"))
+        .map(|value| value.trim().trim_matches('\'').to_owned())
+        .filter(|value| !value.is_empty())
 }
 
-fn parse_color(value: Option<&str>) -> Option<[u8; 3]> {
-    let value = value?;
-    let value = value.strip_prefix('#').unwrap_or(value);
-    if value.len() != 6 {
+fn load_gtk_css(
+    path: &Path,
+    definitions: &mut HashMap<String, String>,
+    visited: &mut HashSet<PathBuf>,
+) {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    if !visited.insert(path.clone()) {
+        return;
+    }
+    let Ok(css) = fs::read_to_string(&path) else {
+        return;
+    };
+    for line in css.lines().map(str::trim) {
+        if let Some(import) = css_import(line) {
+            let imported = path.parent().unwrap_or_else(|| Path::new(".")).join(import);
+            load_gtk_css(&imported, definitions, visited);
+        }
+        if let Some(value) = line.strip_prefix("@define-color ") {
+            if let Some((name, value)) = value.trim_end_matches(';').split_once(char::is_whitespace)
+            {
+                definitions.insert(normalize_color_name(name), value.trim().to_owned());
+            }
+        } else if let Some(value) = line.strip_prefix("--")
+            && let Some((name, value)) = value.split_once(':')
+        {
+            definitions.insert(
+                normalize_color_name(name),
+                value.trim().trim_end_matches(';').to_owned(),
+            );
+        }
+    }
+}
+
+fn css_import(line: &str) -> Option<&str> {
+    let value = line.strip_prefix("@import")?.trim();
+    let value = value
+        .strip_prefix("url(")?
+        .trim_end_matches(';')
+        .trim_end_matches(')');
+    Some(value.trim().trim_matches(['\'', '"']))
+}
+
+fn normalize_color_name(name: &str) -> String {
+    name.trim_start_matches('-').replace('-', "_")
+}
+
+fn resolve_first(definitions: &HashMap<String, String>, names: &[&str]) -> Option<[u8; 3]> {
+    names
+        .iter()
+        .find_map(|name| resolve_color(definitions, name, 0))
+}
+
+fn resolve_color(
+    definitions: &HashMap<String, String>,
+    name: &str,
+    depth: usize,
+) -> Option<[u8; 3]> {
+    if depth > 12 {
         return None;
     }
-    Some([
-        u8::from_str_radix(&value[0..2], 16).ok()?,
-        u8::from_str_radix(&value[2..4], 16).ok()?,
-        u8::from_str_radix(&value[4..6], 16).ok()?,
-    ])
+    let value = definitions.get(&normalize_color_name(name))?.trim();
+    if let Some(alias) = value.strip_prefix('@') {
+        return resolve_color(definitions, alias, depth + 1);
+    }
+    if let Some(alias) = value
+        .strip_prefix("var(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        return resolve_color(definitions, alias.trim(), depth + 1);
+    }
+    parse_css_color(value)
+}
+
+fn parse_css_color(value: &str) -> Option<[u8; 3]> {
+    let value = value.trim();
+    if let Some(hex) = value.strip_prefix('#') {
+        return match hex.len() {
+            3 => Some([
+                u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?,
+                u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?,
+                u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?,
+            ]),
+            6 | 8 => Some([
+                u8::from_str_radix(&hex[0..2], 16).ok()?,
+                u8::from_str_radix(&hex[2..4], 16).ok()?,
+                u8::from_str_radix(&hex[4..6], 16).ok()?,
+            ]),
+            _ => None,
+        };
+    }
+    let components = value
+        .strip_prefix("rgb(")
+        .or_else(|| value.strip_prefix("rgba("))?
+        .split_once(')')?
+        .0
+        .split(',')
+        .take(3)
+        .map(|part| part.trim().parse::<u8>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    (components.len() == 3).then(|| [components[0], components[1], components[2]])
 }
 
 fn clear_rect(data: &mut [u8], width: u32, height: u32, rect: (u32, u32, u32, u32)) {
@@ -1272,7 +1410,7 @@ fn draw_hud(
     ];
     let content_width = items
         .iter()
-        .map(|(key, desc)| (key.len() + 1 + desc.len()) as u32 * 6)
+        .map(|(key, desc)| bold_text_width(key) + 6 + text_width(desc))
         .sum::<u32>()
         + (items.len() as u32 - 1) * 18;
     let bar_width = (content_width + 24).min(width);
@@ -1283,17 +1421,17 @@ fn draw_hud(
         width,
         height,
         (x, y, bar_width, 24),
-        10,
+        6,
         theme.background,
     );
     let mut text_x = x + 12;
     for (index, (key, desc)) in items.into_iter().enumerate() {
-        draw_text(data, width, height, text_x, y + 8, key, theme.accent);
-        text_x += key.len() as u32 * 6;
+        draw_text_bold(data, width, height, text_x, y + 8, key, theme.accent);
+        text_x += bold_text_width(key);
         draw_text(data, width, height, text_x, y + 8, " ", theme.text);
         text_x += 6;
         draw_text(data, width, height, text_x, y + 8, desc, theme.text);
-        text_x += desc.len() as u32 * 6;
+        text_x += text_width(desc);
         if index + 1 < items.len() {
             text_x += 18;
         }
@@ -1439,20 +1577,53 @@ fn put_pixel(data: &mut [u8], width: u32, x: u32, y: u32, color: [u8; 4]) {
     data[i..i + 4].copy_from_slice(&color);
 }
 fn draw_text(data: &mut [u8], width: u32, height: u32, x: u32, y: u32, text: &str, color: [u8; 4]) {
+    draw_text_weight(data, (width, height), (x, y), text, color, false);
+}
+fn draw_text_bold(
+    data: &mut [u8],
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    text: &str,
+    color: [u8; 4],
+) {
+    draw_text_weight(data, (width, height), (x, y), text, color, true);
+}
+fn draw_text_weight(
+    data: &mut [u8],
+    size: (u32, u32),
+    position: (u32, u32),
+    text: &str,
+    color: [u8; 4],
+    bold: bool,
+) {
+    let (width, height) = size;
+    let (x, y) = position;
+    let advance = if bold { 7 } else { 6 };
     for (index, ch) in text.chars().enumerate() {
         let glyph = glyph(ch.to_ascii_lowercase());
         for (row, bits) in glyph.into_iter().enumerate() {
             for col in 0..5 {
                 if bits & (1 << (4 - col)) != 0 {
-                    let px = x + index as u32 * 6 + col;
+                    let px = x + index as u32 * advance + col;
                     let py = y + row as u32;
                     if px < width && py < height {
                         put_pixel(data, width, px, py, color);
+                    }
+                    if bold && px + 1 < width && py < height {
+                        put_pixel(data, width, px + 1, py, color);
                     }
                 }
             }
         }
     }
+}
+fn text_width(text: &str) -> u32 {
+    text.chars().count() as u32 * 6
+}
+fn bold_text_width(text: &str) -> u32 {
+    text.chars().count() as u32 * 7
 }
 fn glyph(ch: char) -> [u8; 7] {
     match ch {
@@ -1553,5 +1724,38 @@ mod tests {
         draw_selection_border(&mut pixels, width, height, (8, 7, 24, 18), theme);
         let top_left = (7usize * width as usize + 8) * 4;
         assert_eq!(&pixels[top_left..top_left + 4], &theme.accent);
+    }
+
+    #[test]
+    fn gtk_color_aliases_and_css_variables_are_resolved() {
+        let mut definitions = HashMap::new();
+        definitions.insert("accent_bg_color".into(), "#8dcdff".into());
+        definitions.insert("theme_selected_bg_color".into(), "@accent_bg_color".into());
+        definitions.insert(
+            "selection_color".into(),
+            "var(--theme-selected-bg-color)".into(),
+        );
+        assert_eq!(
+            resolve_color(&definitions, "selection_color", 0),
+            Some([0x8d, 0xcd, 0xff])
+        );
+        assert_eq!(parse_css_color("#abc"), Some([0xaa, 0xbb, 0xcc]));
+        assert_eq!(parse_css_color("rgba(12, 34, 56, 0.5)"), Some([12, 34, 56]));
+    }
+
+    #[test]
+    fn shortcut_text_is_rendered_with_a_heavier_weight() {
+        let width = 80;
+        let height = 12;
+        let mut regular = vec![0; width as usize * height as usize * 4];
+        let mut bold = regular.clone();
+        draw_text(&mut regular, width, height, 0, 0, "enter", [1, 2, 3, 255]);
+        draw_text_bold(&mut bold, width, height, 0, 0, "enter", [1, 2, 3, 255]);
+        let regular_pixels = regular
+            .chunks_exact(4)
+            .filter(|pixel| pixel[3] != 0)
+            .count();
+        let bold_pixels = bold.chunks_exact(4).filter(|pixel| pixel[3] != 0).count();
+        assert!(bold_pixels > regular_pixels);
     }
 }
