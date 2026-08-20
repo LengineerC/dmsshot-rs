@@ -80,7 +80,17 @@ struct Surface {
     redraw_pending: bool,
     with_cursor: ImageBuffer,
     without_cursor: ImageBuffer,
+    with_cursor_preview: Option<Preview>,
+    without_cursor_preview: Option<Preview>,
+    render_buffer: Vec<u8>,
     buffers: VecDeque<Buffer>,
+}
+
+struct Preview {
+    width: u32,
+    height: u32,
+    normal: Vec<u8>,
+    dimmed: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -236,6 +246,9 @@ pub fn select_region(
             redraw_pending: true,
             with_cursor: background.with_cursor,
             without_cursor: background.without_cursor,
+            with_cursor_preview: None,
+            without_cursor_preview: None,
+            render_buffer: Vec::new(),
             buffers: VecDeque::new(),
         });
     }
@@ -347,6 +360,7 @@ impl SelectorState {
                 source[3],
             ]);
         }
+        self.surfaces[index].render_buffer = rgba;
         let surface = &mut self.surfaces[index];
         surface
             .layer
@@ -375,39 +389,41 @@ impl SelectorState {
         }
     }
 
-    fn render(&self, index: usize, width: u32, height: u32) -> Vec<u8> {
-        let surface = &self.surfaces[index];
-        let source = if self.show_cursor {
-            &surface.with_cursor
-        } else {
-            &surface.without_cursor
-        };
-        let mut rgba = vec![0; width as usize * height as usize * 4];
+    fn render(&mut self, index: usize, width: u32, height: u32) -> Vec<u8> {
         if self.phase == Phase::Select {
-            for y in 0..height {
-                let sy = y as usize * source.height as usize / height as usize;
-                for x in 0..width {
-                    let sx = x as usize * source.width as usize / width as usize;
-                    let si = (sy * source.width as usize + sx) * 4;
-                    let di = (y as usize * width as usize + x as usize) * 4;
-                    // Match DMS' Material scrim (black at alpha 118).
-                    rgba[di] = (source.pixels[si] as u16 * 137 / 255) as u8;
-                    rgba[di + 1] = (source.pixels[si + 1] as u16 * 137 / 255) as u8;
-                    rgba[di + 2] = (source.pixels[si + 2] as u16 * 137 / 255) as u8;
-                    rgba[di + 3] = 255;
-                }
-            }
-            if self.selection.present && self.selection.surface == Some(index) {
-                let rect = selection_rect(&self.selection, width, height);
-                for y in rect.1..rect.1 + rect.3 {
-                    let sy = y as usize * source.height as usize / height as usize;
-                    for x in rect.0..rect.0 + rect.2 {
-                        let sx = x as usize * source.width as usize / width as usize;
-                        let si = (sy * source.width as usize + sx) * 4;
-                        let di = (y as usize * width as usize + x as usize) * 4;
-                        rgba[di..di + 4].copy_from_slice(&source.pixels[si..si + 4]);
+            let rect = (self.selection.present && self.selection.surface == Some(index))
+                .then(|| selection_rect(&self.selection, width, height));
+            let show_cursor = self.show_cursor;
+            let mut rgba = {
+                let surface = &mut self.surfaces[index];
+                let preview = if show_cursor {
+                    prepare_preview(
+                        &surface.with_cursor,
+                        &mut surface.with_cursor_preview,
+                        width,
+                        height,
+                    )
+                } else {
+                    prepare_preview(
+                        &surface.without_cursor,
+                        &mut surface.without_cursor_preview,
+                        width,
+                        height,
+                    )
+                };
+                let mut rgba = std::mem::take(&mut surface.render_buffer);
+                rgba.clone_from(&preview.dimmed);
+                if let Some(rect) = rect {
+                    let row_bytes = rect.2 as usize * 4;
+                    for y in rect.1..rect.1 + rect.3 {
+                        let start = (y as usize * width as usize + rect.0 as usize) * 4;
+                        let end = start + row_bytes;
+                        rgba[start..end].copy_from_slice(&preview.normal[start..end]);
                     }
                 }
+                rgba
+            };
+            if let Some(rect) = rect {
                 draw_selection_border(&mut rgba, width, height, rect, self.theme);
                 draw_label(
                     &mut rgba,
@@ -428,7 +444,10 @@ impl SelectorState {
                     self.theme,
                 );
             }
+            rgba
         } else {
+            let mut rgba = std::mem::take(&mut self.surfaces[index].render_buffer);
+            rgba.resize(width as usize * height as usize * 4, 0);
             for pixel in rgba.chunks_exact_mut(4) {
                 pixel.copy_from_slice(&[0, 0, 0, 102]);
             }
@@ -452,8 +471,8 @@ impl SelectorState {
                     self.theme,
                 );
             }
+            rgba
         }
-        rgba
     }
 
     fn selected_rect(&self) -> Option<(usize, Region, Region)> {
@@ -814,7 +833,7 @@ impl PointerHandler for SelectorState {
                             current.1 = self.selection.anchor.1 + size.copysign(dy);
                         }
                         self.selection.current = current;
-                        self.redraw_all(qh);
+                        self.redraw(index, qh);
                     }
                 }
                 PointerEventKind::Press { button, .. } if button == LEFT_BUTTON => {
@@ -943,7 +962,13 @@ impl KeyboardHandler for SelectorState {
     ) {
         if self.shift != modifiers.shift {
             self.shift = modifiers.shift;
-            self.redraw_all(qh);
+            if self.selection.dragging {
+                if let Some(index) = self.selection.surface {
+                    self.redraw(index, qh);
+                }
+            } else {
+                self.redraw_all(qh);
+            }
         }
     }
 }
@@ -976,6 +1001,45 @@ wayland_client::delegate_noop!(SelectorState: ignore ZwpKeyboardShortcutsInhibit
 wayland_client::delegate_noop!(SelectorState: ignore ZwpKeyboardShortcutsInhibitorV1);
 wayland_client::delegate_noop!(SelectorState: ignore WpViewporter);
 wayland_client::delegate_noop!(SelectorState: ignore WpViewport);
+
+fn prepare_preview<'a>(
+    source: &ImageBuffer,
+    cache: &'a mut Option<Preview>,
+    width: u32,
+    height: u32,
+) -> &'a Preview {
+    let needs_rebuild = cache
+        .as_ref()
+        .is_none_or(|preview| preview.width != width || preview.height != height);
+    if needs_rebuild {
+        let mut normal = vec![0; width as usize * height as usize * 4];
+        for y in 0..height {
+            let sy = y as usize * source.height as usize / height as usize;
+            for x in 0..width {
+                let sx = x as usize * source.width as usize / width as usize;
+                let source_index = (sy * source.width as usize + sx) * 4;
+                let target_index = (y as usize * width as usize + x as usize) * 4;
+                normal[target_index..target_index + 4]
+                    .copy_from_slice(&source.pixels[source_index..source_index + 4]);
+            }
+        }
+        let mut dimmed = normal.clone();
+        for pixel in dimmed.chunks_exact_mut(4) {
+            // Match DMS' Material scrim (black at alpha 118).
+            pixel[0] = (pixel[0] as u16 * 137 / 255) as u8;
+            pixel[1] = (pixel[1] as u16 * 137 / 255) as u8;
+            pixel[2] = (pixel[2] as u16 * 137 / 255) as u8;
+            pixel[3] = 255;
+        }
+        *cache = Some(Preview {
+            width,
+            height,
+            normal,
+            dimmed,
+        });
+    }
+    cache.as_ref().expect("preview cache was populated")
+}
 
 fn selection_rect(selection: &Selection, width: u32, height: u32) -> (u32, u32, u32, u32) {
     let x0 = selection
