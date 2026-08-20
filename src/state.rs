@@ -53,11 +53,7 @@ pub fn output_directory(explicit: Option<&Path>) -> Result<PathBuf> {
         return ensure_dir(PathBuf::from(path));
     }
     if let Some(pictures) = pictures_directory() {
-        let screenshots = pictures.join("Screenshots");
-        if fs::create_dir_all(&screenshots).is_ok() {
-            return Ok(screenshots);
-        }
-        return Ok(pictures);
+        return ensure_dir(pictures.join("Screenshots"));
     }
     Ok(home_dir().unwrap_or_else(|| PathBuf::from(".")))
 }
@@ -97,19 +93,20 @@ fn pictures_directory() -> Option<PathBuf> {
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".config"))
         .join("user-dirs.dirs");
-    let text = fs::read_to_string(config).ok()?;
+    fs::read_to_string(config)
+        .ok()
+        .and_then(|text| parse_pictures_directory(&text, &home))
+        .or_else(|| Some(home.join("Pictures")))
+}
+
+fn parse_pictures_directory(text: &str, home: &Path) -> Option<PathBuf> {
     let value = text
         .lines()
-        .find_map(|line| line.strip_prefix("XDG_PICTURES_DIR="))?;
-    let value = value
+        .find_map(|line| line.strip_prefix("XDG_PICTURES_DIR="))?
         .trim()
         .trim_matches('"')
         .replace("$HOME", home.to_str()?);
-    if value.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(value))
-    }
+    (!value.is_empty()).then(|| PathBuf::from(value))
 }
 
 #[cfg(test)]
@@ -118,7 +115,20 @@ mod tests {
 
     #[test]
     fn filename_uses_selected_extension() {
+        let png = generated_filename(OutputFormat::Png);
+        assert!(png.starts_with("screenshot_"));
+        assert!(png.ends_with(".png"));
+        assert_eq!(png.len(), "screenshot_YYYY-MM-DD_HH-MM-SS.png".len());
         assert!(generated_filename(OutputFormat::Jpg).ends_with(".jpg"));
         assert!(generated_filename(OutputFormat::Ppm).ends_with(".ppm"));
+    }
+
+    #[test]
+    fn parses_xdg_pictures_and_expands_home() {
+        let home = Path::new("/home/tester");
+        assert_eq!(
+            parse_pictures_directory("XDG_PICTURES_DIR=\"$HOME/Pictures\"\n", home),
+            Some(home.join("Pictures"))
+        );
     }
 }
