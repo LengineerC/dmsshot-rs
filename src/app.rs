@@ -71,6 +71,10 @@ impl Application {
             return self.run_ocr(*engine, model_dir.as_deref(), language, *psm);
         }
 
+        // niri's ScreenshotWindow action owns the clipboard as part of the action itself. Copying
+        // the encoded file again here would create a second clipboard item for the same capture.
+        let clipboard_already_set = matches!(&command, Command::Window);
+
         let image = match command {
             Command::Window => Some(self.capture_window()?),
             Command::Full => Some(self.capture_full()?),
@@ -103,7 +107,7 @@ impl Application {
             }
             return Ok(());
         };
-        self.write_result(&image)
+        self.write_result(&image, clipboard_already_set)
     }
 
     fn run_ocr(
@@ -260,7 +264,7 @@ impl Application {
         Ok(image)
     }
 
-    fn write_result(&self, image: &ImageBuffer) -> Result<()> {
+    fn write_result(&self, image: &ImageBuffer, clipboard_already_set: bool) -> Result<()> {
         if self.cli.stdout {
             let stdout = io::stdout();
             let mut lock = stdout.lock();
@@ -284,8 +288,8 @@ impl Application {
             source,
         })?;
 
-        let copied = !self.cli.no_clipboard;
-        if copied {
+        let copied = clipboard_already_set || !self.cli.no_clipboard;
+        if !clipboard_already_set && copied {
             integration::copy_image(&encoded, self.cli.format.mime())?;
         }
 

@@ -69,7 +69,9 @@ Run `dmsshot-rs --help` for image format, destination, cursor, JSON, and stdout 
 uses Enter or Space to confirm, Escape to cancel, `P` to toggle the captured pointer, and Shift to
 constrain a drag to a square. Scroll mode finishes with Enter or the Done button. Successful file
 captures are copied and notified by default; use `--no-clipboard` or `--no-notify` to disable either
-integration. Left-clicking a completion notification opens the captured image; its Open Folder
+integration. The `window` command relies on niri's native `ScreenshotWindow` action, which always
+sets the clipboard as an inherent compositor side effect, including with `--no-clipboard`.
+Left-clicking a completion notification opens the captured image; its Open Folder
 action opens the destination directory. Binary `--stdout` output remains free of clipboard and
 notification side effects.
 

@@ -18,30 +18,46 @@ pub fn copy_text(text: &str) -> Result<()> {
 }
 
 fn copy_to_clipboard(data: &[u8], mime: &str) -> Result<()> {
-    let mut child = Command::new("wl-copy")
-        .args(["--type", mime])
+    let mut command = Command::new("wl-copy");
+    command
+        .args(["--foreground", "--type", mime])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        // wl-copy forks a background owner. Capturing stderr here would keep the pipe open in
-        // that owner and make wait_with_output block for the whole clipboard lifetime.
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let mut child = command
         .spawn()
         .map_err(|error| Error::Clipboard(format!("unable to start wl-copy: {error}")))?;
 
-    child
+    let write_result = child
         .stdin
         .take()
         .ok_or_else(|| Error::Clipboard("wl-copy stdin is unavailable".into()))?
-        .write_all(data)
-        .map_err(|error| Error::Clipboard(format!("unable to send data to wl-copy: {error}")))?;
-
-    let status = child
-        .wait()
-        .map_err(|error| Error::Clipboard(format!("unable to wait for wl-copy: {error}")))?;
-    if status.success() {
-        return Ok(());
+        .write_all(data);
+    if let Err(error) = write_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(Error::Clipboard(format!(
+            "unable to send data to wl-copy: {error}"
+        )));
     }
-    Err(Error::Clipboard(format!("wl-copy exited with {status}")))
+
+    if let Some(status) = child
+        .try_wait()
+        .map_err(|error| Error::Clipboard(format!("unable to inspect wl-copy: {error}")))?
+        && !status.success()
+    {
+        return Err(Error::Clipboard(format!("wl-copy exited with {status}")));
+    }
+    Ok(())
 }
 
 pub fn notify_ocr_success(copied: bool) {

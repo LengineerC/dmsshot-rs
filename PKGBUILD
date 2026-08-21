@@ -2,7 +2,7 @@
 
 pkgname=dmsshot-rs
 pkgver=0.1.0
-pkgrel=3
+pkgrel=4
 pkgdesc='Native Rust screenshot, scrolling capture, and OCR utility for niri'
 arch=('x86_64')
 url='https://github.com/LengineerC/dmsshot-rs'
