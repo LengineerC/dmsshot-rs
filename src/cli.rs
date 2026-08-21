@@ -61,6 +61,15 @@ pub enum Command {
         #[arg(long, default_value_t = 45, value_parser = clap::value_parser!(u64).range(30..=1000))]
         interval: u64,
     },
+    /// Select a region and recognize its text.
+    Ocr {
+        /// Tesseract language or language combination, for example eng or chi_sim+eng.
+        #[arg(short = 'l', long = "lang", default_value = "eng")]
+        language: String,
+        /// Tesseract page segmentation mode.
+        #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u8).range(0..=13))]
+        psm: u8,
+    },
     /// List available outputs.
     List,
     /// Internal notification action listener.
@@ -173,6 +182,28 @@ mod tests {
     fn jpeg_alias_is_accepted() {
         let cli = Cli::try_parse_from(["dmsshot", "--format", "jpeg", "full"]).unwrap();
         assert_eq!(cli.format, OutputFormat::Jpg);
+    }
+
+    #[test]
+    fn ocr_has_language_and_segmentation_defaults() {
+        let cli = Cli::try_parse_from(["dmsshot", "ocr"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Some(Command::Ocr {
+                language: "eng".into(),
+                psm: 6,
+            })
+        );
+        let cli =
+            Cli::try_parse_from(["dmsshot", "ocr", "--lang", "chi_sim+eng", "--psm", "3"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Some(Command::Ocr {
+                language: "chi_sim+eng".into(),
+                psm: 3,
+            })
+        );
+        assert!(Cli::try_parse_from(["dmsshot", "ocr", "--psm", "14"]).is_err());
     }
 
     #[test]

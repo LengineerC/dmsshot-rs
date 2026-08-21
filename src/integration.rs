@@ -10,6 +10,14 @@ use std::os::unix::process::CommandExt;
 use crate::error::{Error, Result};
 
 pub fn copy_image(data: &[u8], mime: &str) -> Result<()> {
+    copy_to_clipboard(data, mime)
+}
+
+pub fn copy_text(text: &str) -> Result<()> {
+    copy_to_clipboard(text.as_bytes(), "text/plain;charset=utf-8")
+}
+
+fn copy_to_clipboard(data: &[u8], mime: &str) -> Result<()> {
     let mut child = Command::new("wl-copy")
         .args(["--type", mime])
         .stdin(Stdio::piped())
@@ -25,7 +33,7 @@ pub fn copy_image(data: &[u8], mime: &str) -> Result<()> {
         .take()
         .ok_or_else(|| Error::Clipboard("wl-copy stdin is unavailable".into()))?
         .write_all(data)
-        .map_err(|error| Error::Clipboard(format!("unable to send image to wl-copy: {error}")))?;
+        .map_err(|error| Error::Clipboard(format!("unable to send data to wl-copy: {error}")))?;
 
     let status = child
         .wait()
@@ -34,6 +42,27 @@ pub fn copy_image(data: &[u8], mime: &str) -> Result<()> {
         return Ok(());
     }
     Err(Error::Clipboard(format!("wl-copy exited with {status}")))
+}
+
+pub fn notify_ocr_success(copied: bool) {
+    let body = if copied {
+        "Recognized text copied to clipboard"
+    } else {
+        "Text recognition completed"
+    };
+    let _ = Command::new("notify-send")
+        .args([
+            "--app-name",
+            "dmsshot-rs",
+            "--expire-time",
+            "5000",
+            "Text recognized",
+            body,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 pub fn notify_success(path: &Path, copied: bool) {

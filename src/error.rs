@@ -30,6 +30,14 @@ pub enum Error {
     WriteFile { path: PathBuf, source: io::Error },
     #[error("clipboard: {0}")]
     Clipboard(String),
+    #[error(
+        "OCR engine `tesseract` was not found; install Tesseract and the required language data"
+    )]
+    OcrUnavailable,
+    #[error("OCR failed: {0}")]
+    Ocr(String),
+    #[error("OCR did not recognize any text")]
+    OcrNoText,
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]

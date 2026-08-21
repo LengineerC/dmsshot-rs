@@ -4,6 +4,7 @@ mod error;
 mod imagebuf;
 mod integration;
 mod niri;
+mod ocr;
 mod overlay;
 mod state;
 mod stitch;

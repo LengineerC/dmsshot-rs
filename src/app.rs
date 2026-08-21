@@ -13,6 +13,7 @@ use crate::{
     imagebuf::ImageBuffer,
     integration,
     niri::{self, OutputInfo},
+    ocr,
     overlay::{self, Background, SelectorOptions},
     state,
     wayland::WaylandCapture,
@@ -39,6 +40,15 @@ struct Metadata<'a> {
     error: Option<&'a str>,
 }
 
+#[derive(Serialize)]
+struct OcrMetadata<'a> {
+    status: &'a str,
+    text: &'a str,
+    width: u32,
+    height: u32,
+    language: &'a str,
+}
+
 impl Application {
     pub fn new(cli: Cli) -> Result<Self> {
         niri::ensure_niri()?;
@@ -49,6 +59,9 @@ impl Application {
         let command = self.cli.command();
         if command == Command::List {
             return self.list_outputs();
+        }
+        if let Command::Ocr { language, psm } = &command {
+            return self.run_ocr(language, *psm);
         }
 
         let image = match command {
@@ -64,6 +77,7 @@ impl Application {
             }
             Command::Region => self.capture_interactive(false, 45)?,
             Command::Scroll { interval } => self.capture_interactive(true, interval)?,
+            Command::Ocr { .. } => unreachable!(),
             Command::List => unreachable!(),
             Command::NotificationAction { .. } => unreachable!(),
         };
@@ -83,6 +97,44 @@ impl Application {
             return Ok(());
         };
         self.write_result(&image)
+    }
+
+    fn run_ocr(&self, language: &str, psm: u8) -> Result<()> {
+        ocr::ensure_available()?;
+        let Some(image) = self.capture_interactive(false, 45)? else {
+            if self.cli.json {
+                print_json(&Metadata {
+                    status: "aborted",
+                    path: None,
+                    width: None,
+                    height: None,
+                    scale: None,
+                    mime: None,
+                    error: Some("User cancelled selection"),
+                })?;
+            }
+            return Ok(());
+        };
+        let text = ocr::recognize(&image, language, psm)?;
+        let copied = !self.cli.no_clipboard;
+        if copied {
+            integration::copy_text(&text)?;
+        }
+        if self.cli.json {
+            print_json(&OcrMetadata {
+                status: "success",
+                text: &text,
+                width: image.width,
+                height: image.height,
+                language,
+            })?;
+        } else {
+            println!("{text}");
+        }
+        if !self.cli.no_notify {
+            integration::notify_ocr_success(copied);
+        }
+        Ok(())
     }
 
     fn list_outputs(&self) -> Result<()> {

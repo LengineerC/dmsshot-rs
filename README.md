@@ -21,6 +21,32 @@ The resulting binary is `target/release/dmsshot-rs`. Building requires Rust 1.88
 development files, `pkg-config`, and `libxkbcommon`. At runtime, `wl-copy` provides persistent
 Wayland clipboard ownership, `notify-send` sends the actionable completion notification, and
 `xdg-open` opens captured images or their containing folders.
+The optional `ocr` command requires the `tesseract` executable and the trained data for each
+requested language.
+
+### Arch Linux package
+
+The included `PKGBUILD` declares Tesseract, Simplified and Traditional Chinese (horizontal and
+vertical), and English trained data as dependencies. A normal pacman-managed installation places
+the binary in `/usr/bin`:
+
+```sh
+makepkg -si
+```
+
+For a user-local installation in `~/.local/bin`, install the dependencies, build the same release
+target, and install it as the current user:
+
+```sh
+sudo pacman -S --needed tesseract tesseract-data-chi_sim tesseract-data-chi_tra \
+  tesseract-data-chi_sim_vert tesseract-data-chi_tra_vert tesseract-data-eng
+makepkg -s
+install -Dm755 target/release/dmsshot-rs "$HOME/.local/bin/dmsshot-rs"
+```
+
+Make sure `$HOME/.local/bin` is present in `PATH`. A PKGBUILD intentionally cannot install directly
+into an arbitrary user's home directory: pacman packages are installed as root and must own stable
+system paths.
 
 ## Usage
 
@@ -31,6 +57,7 @@ dmsshot-rs all             # composite every output
 dmsshot-rs output DP-1     # named output
 dmsshot-rs window          # focused niri window
 dmsshot-rs scroll          # interactive scrolling capture
+dmsshot-rs ocr             # recognize text in an interactive region
 dmsshot-rs list            # output information
 ```
 
@@ -51,6 +78,25 @@ current directory.
 The default format is PNG and the generated filename is
 `screenshot_YYYY-MM-DD_HH-MM-SS.png`, using local time. Selecting JPEG or PPM changes the filename
 extension accordingly, while `--filename` overrides the generated name.
+
+## OCR
+
+`dmsshot-rs ocr` opens the normal region selector and sends the selected pixels directly to
+Tesseract as PNG data. It does not save a temporary or screenshot file. Recognized text is printed
+to stdout and copied to the text clipboard by default; use `--no-clipboard` or `--no-notify` to
+disable either integration. `--json` returns `status`, `text`, `width`, `height`, and `language`.
+
+The default language is English and the default Tesseract page segmentation mode is 6. Select one
+or more installed language models with `--lang`, and adjust segmentation with `--psm` when needed:
+
+```sh
+dmsshot-rs ocr
+dmsshot-rs ocr --lang chi_sim+eng
+dmsshot-rs ocr --lang jpn --psm 3 --json
+```
+
+Language names must match the output of `tesseract --list-langs`. For Chinese recognition, install
+the `chi_sim` and/or `chi_tra` Tesseract trained-data packages provided by the operating system.
 
 ## GTK theme support
 
