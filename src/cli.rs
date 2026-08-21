@@ -81,7 +81,7 @@ pub enum Command {
         /// OCR engine. Paddle uses the bundled Chinese/English PP-OCRv4 model set.
         #[arg(long, value_enum, default_value_t = OcrEngine::Paddle)]
         engine: OcrEngine,
-        /// Directory containing PaddleOCR ONNX models and ppocr_keys_v1.txt.
+        /// Directory containing the PaddleOCR detection, orientation, and recognition models.
         #[arg(long, value_name = "DIR")]
         model_dir: Option<PathBuf>,
         /// Tesseract language or language combination (only used by --engine tesseract).

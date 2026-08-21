@@ -1,11 +1,11 @@
 use std::{
-    env, fs,
+    env,
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
-use paddleocr_rs_onnx::{OcrEngine as PaddleEngine, OrderBy};
+use paddle_ocr_rs::ocr_lite::OcrLite;
 
 use crate::{
     cli::{OcrEngine, OutputFormat},
@@ -16,36 +16,36 @@ use crate::{
 const TARGET_OCR_SCALE: f64 = 2.0;
 const MAX_UPSCALED_PIXELS: f64 = 32.0 * 1024.0 * 1024.0;
 const DET_MODEL: &str = "ch_PP-OCRv4_det_infer.onnx";
+const CLS_MODEL: &str = "ch_ppocr_mobile_v2.0_cls_infer.onnx";
 const REC_MODEL: &str = "ch_PP-OCRv4_rec_infer.onnx";
-const KEYS_FILE: &str = "ppocr_keys_v1.txt";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaddleModelPaths {
     directory: PathBuf,
     detection: PathBuf,
+    classification: PathBuf,
     recognition: PathBuf,
-    keys: PathBuf,
 }
 
 impl PaddleModelPaths {
     fn from_directory(directory: PathBuf) -> Self {
         Self {
             detection: directory.join(DET_MODEL),
+            classification: directory.join(CLS_MODEL),
             recognition: directory.join(REC_MODEL),
-            keys: directory.join(KEYS_FILE),
             directory,
         }
     }
 
     fn is_complete(&self) -> bool {
-        self.detection.is_file() && self.recognition.is_file() && self.keys.is_file()
+        self.detection.is_file() && self.classification.is_file() && self.recognition.is_file()
     }
 
     fn missing_names(&self) -> Vec<&'static str> {
         [
             (!self.detection.is_file()).then_some(DET_MODEL),
+            (!self.classification.is_file()).then_some(CLS_MODEL),
             (!self.recognition.is_file()).then_some(REC_MODEL),
-            (!self.keys.is_file()).then_some(KEYS_FILE),
         ]
         .into_iter()
         .flatten()
@@ -100,7 +100,7 @@ fn find_paddle_models(explicit: Option<&Path>) -> Result<PaddleModelPaths> {
     let missing = candidates
         .first()
         .map(PaddleModelPaths::missing_names)
-        .unwrap_or_else(|| vec![DET_MODEL, REC_MODEL, KEYS_FILE])
+        .unwrap_or_else(|| vec![DET_MODEL, CLS_MODEL, REC_MODEL])
         .join(", ");
     let searched = candidates
         .iter()
@@ -142,44 +142,52 @@ fn paddle_model_directories(
 }
 
 fn recognize_paddle(models: &PaddleModelPaths, image: &ImageBuffer) -> Result<String> {
-    let detection = read_model(&models.detection)?;
-    let recognition = read_model(&models.recognition)?;
-    let keys = read_model(&models.keys)?;
-    let engine = PaddleEngine::new(&detection, &recognition, &keys)
+    let mut engine = OcrLite::new();
+    engine
+        .init_models(
+            model_path(&models.detection)?,
+            model_path(&models.classification)?,
+            model_path(&models.recognition)?,
+            2,
+        )
         .map_err(|error| Error::Ocr(format!("unable to load PaddleOCR models: {error}")))?;
 
-    let mut pixels = image.pixels.clone();
-    for pixel in pixels.chunks_exact_mut(4) {
+    let mut pixels = Vec::with_capacity(image.width as usize * image.height as usize * 3);
+    for pixel in image.pixels.chunks_exact(4) {
         let alpha = pixel[3] as u32;
-        if alpha != 255 {
-            for channel in &mut pixel[..3] {
-                *channel = ((*channel as u32 * alpha + 255 * (255 - alpha)) / 255) as u8;
-            }
-            pixel[3] = 255;
+        for channel in &pixel[..3] {
+            pixels.push(((*channel as u32 * alpha + 255 * (255 - alpha)) / 255) as u8);
         }
     }
-    let rgba = image::RgbaImage::from_raw(image.width, image.height, pixels)
+    let rgb = image::RgbImage::from_raw(image.width, image.height, pixels)
         .ok_or_else(|| Error::Ocr("unable to prepare the screenshot for PaddleOCR".into()))?;
-    let blocks = engine
-        .recognize_all(&image::DynamicImage::ImageRgba8(rgba), OrderBy::Horizontal)
+    let result = engine
+        .detect_angle_rollback(&rgb, 24, 2048, 0.45, 0.3, 1.6, true, false, 0.55)
         .map_err(|error| Error::Ocr(format!("PaddleOCR inference failed: {error}")))?
+        .text_blocks;
+    let blocks = result
         .into_iter()
-        .filter(|block| !block.text.trim().is_empty() && block.confidence >= 0.35)
-        .map(|block| TextBlock {
-            text: normalize_text(block.text),
-            confidence: block.confidence,
-            x: block.x,
-            y: block.y,
-            width: block.width,
-            height: block.height,
+        .filter_map(|block| {
+            let min_x = block.box_points.iter().map(|point| point.x).min()?;
+            let min_y = block.box_points.iter().map(|point| point.y).min()?;
+            let max_x = block.box_points.iter().map(|point| point.x).max()?;
+            let max_y = block.box_points.iter().map(|point| point.y).max()?;
+            Some(TextBlock {
+                text: normalize_text(block.text),
+                confidence: block.text_score,
+                x: min_x as f32,
+                y: min_y as f32,
+                width: max_x.saturating_sub(min_x).max(1) as f32,
+                height: max_y.saturating_sub(min_y).max(1) as f32,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect();
     assemble_paddle_text(blocks)
 }
 
-fn read_model(path: &Path) -> Result<Vec<u8>> {
-    fs::read(path)
-        .map_err(|error| Error::Ocr(format!("unable to read {}: {error}", path.display())))
+fn model_path(path: &Path) -> Result<&str> {
+    path.to_str()
+        .ok_or_else(|| Error::Ocr(format!("model path is not valid UTF-8: {}", path.display())))
 }
 
 #[derive(Debug, Clone)]
@@ -677,12 +685,27 @@ mod tests {
             .expect("DMSSHOT_TEST_OCR_MODEL_DIR is required");
         let models = PaddleModelPaths::from_directory(directory);
         assert!(models.is_complete());
-        let mut image = ImageBuffer::new(320, 120).unwrap();
-        image.pixels.fill(255);
-        assert!(matches!(
-            recognize_paddle(&models, &image),
-            Ok(_) | Err(Error::OcrNoText)
-        ));
+        if let Some(path) = std::env::var_os("DMSSHOT_TEST_OCR_IMAGE") {
+            let rgba = image::open(path).unwrap().into_rgba8();
+            let image = ImageBuffer {
+                width: rgba.width(),
+                height: rgba.height(),
+                pixels: rgba.into_raw(),
+                scale: 1.0,
+                region: Default::default(),
+            };
+            let text = recognize_paddle(&models, &image).unwrap();
+            eprintln!("recognized: {text:?}");
+            assert!(text.contains("正品促销"));
+            assert!(text.contains("强力去污"));
+        } else {
+            let mut image = ImageBuffer::new(320, 120).unwrap();
+            image.pixels.fill(255);
+            assert!(matches!(
+                recognize_paddle(&models, &image),
+                Ok(_) | Err(Error::OcrNoText)
+            ));
+        }
     }
 
     #[test]

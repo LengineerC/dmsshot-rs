@@ -26,9 +26,9 @@ locally through the Rust ONNX Runtime bindings; Python and PaddlePaddle are not 
 
 ### Arch Linux package
 
-The included `PKGBUILD` downloads a pinned and checksummed PP-OCRv4 mobile detection model,
-Chinese/English recognition model, and character dictionary from RapidOCR. It installs the models
-under `/usr/share/dmsshot-rs/models` and the binary in `/usr/bin`:
+The included `PKGBUILD` downloads pinned and checksummed PP-OCRv4 mobile detection,
+orientation-classification, and Chinese/English recognition models from RapidOCR. It installs the
+models under `/usr/share/dmsshot-rs/models` and the binary in `/usr/bin`:
 
 ```sh
 makepkg -si
@@ -42,10 +42,10 @@ makepkg -s
 install -Dm755 target/release/dmsshot-rs "$HOME/.local/bin/dmsshot-rs"
 install -Dm644 ch_PP-OCRv4_det_infer.onnx \
   "$HOME/.local/share/dmsshot-rs/models/ch_PP-OCRv4_det_infer.onnx"
+install -Dm644 ch_ppocr_mobile_v2.0_cls_infer.onnx \
+  "$HOME/.local/share/dmsshot-rs/models/ch_ppocr_mobile_v2.0_cls_infer.onnx"
 install -Dm644 ch_PP-OCRv4_rec_infer.onnx \
   "$HOME/.local/share/dmsshot-rs/models/ch_PP-OCRv4_rec_infer.onnx"
-install -Dm644 ppocr_keys_v1.txt \
-  "$HOME/.local/share/dmsshot-rs/models/ppocr_keys_v1.txt"
 ```
 
 Make sure `$HOME/.local/bin` is present in `PATH`. A PKGBUILD intentionally cannot install directly
@@ -94,8 +94,8 @@ integration. `--json` returns `status`, `text`, `width`, `height`, `engine`, and
 
 Models are searched in `--model-dir`, `DMSSHOT_OCR_MODEL_DIR`, the XDG user data directory, the
 installation prefix, and `/usr/share/dmsshot-rs/models`, in that order. A custom model directory
-must contain `ch_PP-OCRv4_det_infer.onnx`, `ch_PP-OCRv4_rec_infer.onnx`, and
-`ppocr_keys_v1.txt`:
+must contain `ch_PP-OCRv4_det_infer.onnx`, `ch_ppocr_mobile_v2.0_cls_infer.onnx`,
+and `ch_PP-OCRv4_rec_infer.onnx`. The recognition model contains its matching character table:
 
 ```sh
 dmsshot-rs ocr
@@ -114,7 +114,8 @@ dmsshot-rs ocr --engine tesseract --lang chi_sim+eng
 The ONNX model files are converted from PaddleOCR models and distributed by
 [RapidOCR](https://github.com/RapidAI/RapidOCR). PaddleOCR and its models are provided by
 [PaddlePaddle](https://github.com/PaddlePaddle/PaddleOCR) under the Apache-2.0 license; the Rust
-integration uses [PaddleOCR-rs](https://github.com/Craun718/PaddleOCR-rs) under the MIT license.
+integration uses [paddle-ocr-rs](https://github.com/mg-chao/paddle-ocr-rs) under the Apache-2.0
+license.
 
 ## GTK theme support
 
