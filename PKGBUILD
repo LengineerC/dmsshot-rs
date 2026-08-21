@@ -7,6 +7,9 @@ pkgdesc='Native Rust screenshot, scrolling capture, and OCR utility for niri'
 arch=('x86_64')
 url='https://github.com/LengineerC/dmsshot-rs'
 license=('MIT' 'Apache-2.0')
+# GCC LTO objects produced for clipper-sys cannot be consumed by rust-lld.
+# Cargo's release profile still applies thin LTO to the Rust code.
+options=(!lto)
 depends=(
     'libnotify'
     'libxkbcommon'
