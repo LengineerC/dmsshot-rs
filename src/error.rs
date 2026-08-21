@@ -30,10 +30,12 @@ pub enum Error {
     WriteFile { path: PathBuf, source: io::Error },
     #[error("clipboard: {0}")]
     Clipboard(String),
+    #[error("OCR engine `tesseract` was not found; install Tesseract and its language data")]
+    TesseractUnavailable,
     #[error(
-        "OCR engine `tesseract` was not found; install Tesseract and the required language data"
+        "PaddleOCR models were not found in {searched}; expected {missing}. Use `ocr --model-dir DIR` or set DMSSHOT_OCR_MODEL_DIR"
     )]
-    OcrUnavailable,
+    PaddleModelsMissing { searched: String, missing: String },
     #[error("OCR failed: {0}")]
     Ocr(String),
     #[error("OCR did not recognize any text")]

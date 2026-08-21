@@ -10,6 +10,9 @@ chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 clap = { version = "4.6.5", features = ["derive"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "pnm"] }
 libc = "0.2.186"
+# paddleocr_rs_onnx 0.2.7 uses APIs removed by ort rc.13.
+ort = "=2.0.0-rc.12"
+paddleocr_rs_onnx = "=0.2.7"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"
 smithay-client-toolkit = "0.21.1"

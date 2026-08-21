@@ -8,7 +8,7 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    cli::{Cli, Command},
+    cli::{Cli, Command, OcrEngine},
     error::{Error, Result},
     imagebuf::ImageBuffer,
     integration,
@@ -46,6 +46,7 @@ struct OcrMetadata<'a> {
     text: &'a str,
     width: u32,
     height: u32,
+    engine: &'a str,
     language: &'a str,
 }
 
@@ -60,8 +61,14 @@ impl Application {
         if command == Command::List {
             return self.list_outputs();
         }
-        if let Command::Ocr { language, psm } = &command {
-            return self.run_ocr(language, *psm);
+        if let Command::Ocr {
+            engine,
+            model_dir,
+            language,
+            psm,
+        } = &command
+        {
+            return self.run_ocr(*engine, model_dir.as_deref(), language, *psm);
         }
 
         let image = match command {
@@ -99,8 +106,14 @@ impl Application {
         self.write_result(&image)
     }
 
-    fn run_ocr(&self, language: &str, psm: u8) -> Result<()> {
-        ocr::ensure_available()?;
+    fn run_ocr(
+        &self,
+        engine: OcrEngine,
+        model_dir: Option<&std::path::Path>,
+        language: &str,
+        psm: Option<u8>,
+    ) -> Result<()> {
+        let paddle_models = ocr::ensure_available(engine, model_dir)?;
         let Some(image) = self.capture_interactive(false, 45)? else {
             if self.cli.json {
                 print_json(&Metadata {
@@ -115,7 +128,7 @@ impl Application {
             }
             return Ok(());
         };
-        let text = ocr::recognize(&image, language, psm)?;
+        let text = ocr::recognize(engine, paddle_models.as_ref(), &image, language, psm)?;
         let copied = !self.cli.no_clipboard;
         if copied {
             integration::copy_text(&text)?;
@@ -126,7 +139,12 @@ impl Application {
                 text: &text,
                 width: image.width,
                 height: image.height,
-                language,
+                engine: engine.name(),
+                language: if engine == OcrEngine::Paddle {
+                    "ch+en"
+                } else {
+                    language
+                },
             })?;
         } else {
             println!("{text}");

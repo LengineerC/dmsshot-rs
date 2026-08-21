@@ -22,6 +22,21 @@ pub enum OutputFormat {
     Ppm,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OcrEngine {
+    Paddle,
+    Tesseract,
+}
+
+impl OcrEngine {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Paddle => "paddle",
+            Self::Tesseract => "tesseract",
+        }
+    }
+}
+
 impl OutputFormat {
     pub fn extension(self) -> &'static str {
         match self {
@@ -63,12 +78,18 @@ pub enum Command {
     },
     /// Select a region and recognize its text.
     Ocr {
-        /// Tesseract language or language combination, for example eng or chi_sim+eng.
-        #[arg(short = 'l', long = "lang", default_value = "eng")]
+        /// OCR engine. Paddle uses the bundled Chinese/English PP-OCRv4 model set.
+        #[arg(long, value_enum, default_value_t = OcrEngine::Paddle)]
+        engine: OcrEngine,
+        /// Directory containing PaddleOCR ONNX models and ppocr_keys_v1.txt.
+        #[arg(long, value_name = "DIR")]
+        model_dir: Option<PathBuf>,
+        /// Tesseract language or language combination (only used by --engine tesseract).
+        #[arg(short = 'l', long = "lang", default_value = "chi_sim+eng")]
         language: String,
-        /// Tesseract page segmentation mode.
-        #[arg(long, default_value_t = 6, value_parser = clap::value_parser!(u8).range(0..=13))]
-        psm: u8,
+        /// Force a Tesseract page segmentation mode (only used by --engine tesseract).
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=13))]
+        psm: Option<u8>,
     },
     /// List available outputs.
     List,
@@ -185,22 +206,35 @@ mod tests {
     }
 
     #[test]
-    fn ocr_has_language_and_segmentation_defaults() {
+    fn ocr_defaults_to_paddle_and_accepts_tesseract_options() {
         let cli = Cli::try_parse_from(["dmsshot", "ocr"]).unwrap();
         assert_eq!(
             cli.command,
             Some(Command::Ocr {
-                language: "eng".into(),
-                psm: 6,
+                engine: super::OcrEngine::Paddle,
+                model_dir: None,
+                language: "chi_sim+eng".into(),
+                psm: None,
             })
         );
-        let cli =
-            Cli::try_parse_from(["dmsshot", "ocr", "--lang", "chi_sim+eng", "--psm", "3"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "dmsshot",
+            "ocr",
+            "--engine",
+            "tesseract",
+            "--lang",
+            "chi_sim+eng",
+            "--psm",
+            "3",
+        ])
+        .unwrap();
         assert_eq!(
             cli.command,
             Some(Command::Ocr {
+                engine: super::OcrEngine::Tesseract,
+                model_dir: None,
                 language: "chi_sim+eng".into(),
-                psm: 3,
+                psm: Some(3),
             })
         );
         assert!(Cli::try_parse_from(["dmsshot", "ocr", "--psm", "14"]).is_err());

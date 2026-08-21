@@ -21,27 +21,31 @@ The resulting binary is `target/release/dmsshot-rs`. Building requires Rust 1.88
 development files, `pkg-config`, and `libxkbcommon`. At runtime, `wl-copy` provides persistent
 Wayland clipboard ownership, `notify-send` sends the actionable completion notification, and
 `xdg-open` opens captured images or their containing folders.
-The optional `ocr` command requires the `tesseract` executable and the trained data for each
-requested language.
+The `ocr` command uses PaddleOCR PP-OCRv4 Chinese/English ONNX models by default. Inference runs
+locally through the Rust ONNX Runtime bindings; Python and PaddlePaddle are not required.
 
 ### Arch Linux package
 
-The included `PKGBUILD` declares Tesseract, Simplified and Traditional Chinese (horizontal and
-vertical), and English trained data as dependencies. A normal pacman-managed installation places
-the binary in `/usr/bin`:
+The included `PKGBUILD` downloads a pinned and checksummed PP-OCRv4 mobile detection model,
+Chinese/English recognition model, and character dictionary from RapidOCR. It installs the models
+under `/usr/share/dmsshot-rs/models` and the binary in `/usr/bin`:
 
 ```sh
 makepkg -si
 ```
 
-For a user-local installation in `~/.local/bin`, install the dependencies, build the same release
-target, and install it as the current user:
+For a user-local installation in `~/.local/bin`, first build the package so that its model sources
+are downloaded and verified, then install the binary and model files as the current user:
 
 ```sh
-sudo pacman -S --needed tesseract tesseract-data-chi_sim tesseract-data-chi_tra \
-  tesseract-data-chi_sim_vert tesseract-data-chi_tra_vert tesseract-data-eng
 makepkg -s
 install -Dm755 target/release/dmsshot-rs "$HOME/.local/bin/dmsshot-rs"
+install -Dm644 ch_PP-OCRv4_det_infer.onnx \
+  "$HOME/.local/share/dmsshot-rs/models/ch_PP-OCRv4_det_infer.onnx"
+install -Dm644 ch_PP-OCRv4_rec_infer.onnx \
+  "$HOME/.local/share/dmsshot-rs/models/ch_PP-OCRv4_rec_infer.onnx"
+install -Dm644 ppocr_keys_v1.txt \
+  "$HOME/.local/share/dmsshot-rs/models/ppocr_keys_v1.txt"
 ```
 
 Make sure `$HOME/.local/bin` is present in `PATH`. A PKGBUILD intentionally cannot install directly
@@ -81,22 +85,36 @@ extension accordingly, while `--filename` overrides the generated name.
 
 ## OCR
 
-`dmsshot-rs ocr` opens the normal region selector and sends the selected pixels directly to
-Tesseract as PNG data. It does not save a temporary or screenshot file. Recognized text is printed
-to stdout and copied to the text clipboard by default; use `--no-clipboard` or `--no-notify` to
-disable either integration. `--json` returns `status`, `text`, `width`, `height`, and `language`.
+`dmsshot-rs ocr` opens the normal region selector and passes the selected RGBA pixels directly to a
+local PaddleOCR pipeline: DBNet text detection followed by PP-OCRv4 Chinese/English recognition.
+It does not save a temporary screenshot file. Detected blocks are restored to reading order and
+artificial spaces between Chinese characters are removed. Recognized text is printed to stdout and
+copied to the text clipboard by default; use `--no-clipboard` or `--no-notify` to disable either
+integration. `--json` returns `status`, `text`, `width`, `height`, `engine`, and `language`.
 
-The default language is English and the default Tesseract page segmentation mode is 6. Select one
-or more installed language models with `--lang`, and adjust segmentation with `--psm` when needed:
+Models are searched in `--model-dir`, `DMSSHOT_OCR_MODEL_DIR`, the XDG user data directory, the
+installation prefix, and `/usr/share/dmsshot-rs/models`, in that order. A custom model directory
+must contain `ch_PP-OCRv4_det_infer.onnx`, `ch_PP-OCRv4_rec_infer.onnx`, and
+`ppocr_keys_v1.txt`:
 
 ```sh
 dmsshot-rs ocr
-dmsshot-rs ocr --lang chi_sim+eng
-dmsshot-rs ocr --lang jpn --psm 3 --json
+dmsshot-rs ocr --model-dir /path/to/models
+dmsshot-rs ocr --json
 ```
 
-Language names must match the output of `tesseract --list-langs`. For Chinese recognition, install
-the `chi_sim` and/or `chi_tra` Tesseract trained-data packages provided by the operating system.
+Tesseract remains available as an explicit compatibility fallback. Its language names must match
+`tesseract --list-langs`; `--lang` and `--psm` apply only to this engine:
+
+```sh
+sudo pacman -S --needed tesseract tesseract-data-chi_sim tesseract-data-eng
+dmsshot-rs ocr --engine tesseract --lang chi_sim+eng
+```
+
+The ONNX model files are converted from PaddleOCR models and distributed by
+[RapidOCR](https://github.com/RapidAI/RapidOCR). PaddleOCR and its models are provided by
+[PaddlePaddle](https://github.com/PaddlePaddle/PaddleOCR) under the Apache-2.0 license; the Rust
+integration uses [PaddleOCR-rs](https://github.com/Craun718/PaddleOCR-rs) under the MIT license.
 
 ## GTK theme support
 
