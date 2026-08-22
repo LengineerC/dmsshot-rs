@@ -17,6 +17,7 @@ const SERVICE: &str = "org.kde.KWin.ScreenShot2";
 const PATH: &str = "/org/kde/KWin/ScreenShot2";
 const INTERFACE: &str = "org.kde.KWin.ScreenShot2";
 const PIPE_TIMEOUT: Duration = Duration::from_secs(10);
+const AUTHORIZATION_HINT: &str = "install the root-owned /usr/share/applications/dmsshot-rs.desktop with Exec=/usr/bin/dmsshot-rs and X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2, then run /usr/bin/dmsshot-rs instead of an unpackaged copy";
 
 // Stable QImage::Format values used by KWin's ScreenShot2 interface.
 const QIMAGE_RGB32: u32 = 4;
@@ -379,9 +380,7 @@ fn result_string<'a>(results: &'a Results, key: &str) -> Option<&'a str> {
 fn dbus_error(error: zbus::Error) -> Error {
     let message = error.to_string();
     if message.to_ascii_lowercase().contains("not authorized") {
-        Error::Kde(format!(
-            "{message}; install dmsshot-rs.desktop with X-KDE-DBUS-Restricted-Interfaces={INTERFACE}"
-        ))
+        Error::Kde(format!("{message}; {AUTHORIZATION_HINT}"))
     } else {
         Error::Kde(message)
     }
@@ -390,6 +389,14 @@ fn dbus_error(error: zbus::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_file_authorizes_the_installed_executable() {
+        let desktop = include_str!("../../data/dmsshot-rs.desktop");
+        assert!(desktop.contains("Exec=/usr/bin/dmsshot-rs\n"));
+        assert!(desktop.contains(&format!("X-KDE-DBUS-Restricted-Interfaces={INTERFACE}\n")));
+        assert!(AUTHORIZATION_HINT.contains("/usr/bin/dmsshot-rs"));
+    }
 
     #[test]
     fn converts_kwin_rgba_with_stride() {

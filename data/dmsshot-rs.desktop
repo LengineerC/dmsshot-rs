@@ -2,9 +2,11 @@
 Name=dmsshot-rs
 GenericName=Screenshot Capture Utility
 Comment=Native Wayland screenshot, scrolling capture, and OCR utility
-Exec=dmsshot-rs
+Exec=/usr/bin/dmsshot-rs
+TryExec=/usr/bin/dmsshot-rs
 Icon=camera-photo
 Terminal=false
+StartupNotify=false
 Type=Application
 NoDisplay=true
 Categories=Graphics;

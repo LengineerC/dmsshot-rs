@@ -113,11 +113,22 @@ active screen, `all` captures the complete workspace, `output` captures a named 
 KWin area captures and requires ScreenShot2 version 5 or newer so KWin can hide the overlay owned
 by dmsshot-rs.
 
-Some KWin versions restrict screenshot access to installed desktop applications. The PKGBUILD
-installs `dmsshot-rs.desktop` with the required `X-KDE-DBUS-Restricted-Interfaces` declaration.
-When running an unpackaged build on such a KWin version, install that file under
-`~/.local/share/applications/` first. KWin screenshots are returned as raw pixels and do not launch
-Spectacle or an xdg-desktop-portal dialog.
+KWin restricts this screenshot interface to installed desktop applications. The PKGBUILD installs
+the executable as `/usr/bin/dmsshot-rs` and installs a root-owned
+`/usr/share/applications/dmsshot-rs.desktop` whose absolute `Exec` path and
+`X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2` declaration authorize that exact
+executable. Run the installed `/usr/bin/dmsshot-rs` on Plasma: an unpackaged `./dmsshot-rs`, a
+binary under `target/`, or a copy under `~/.local/bin` intentionally does not inherit this
+permission. For a manual system installation, use:
+
+```sh
+sudo install -Dm755 target/release/dmsshot-rs /usr/bin/dmsshot-rs
+sudo install -Dm644 data/dmsshot-rs.desktop /usr/share/applications/dmsshot-rs.desktop
+kbuildsycoca6
+```
+
+KWin screenshots are returned as raw pixels and do not launch Spectacle or an
+xdg-desktop-portal dialog.
 
 Without a compositor backend, `full` falls back deterministically to the first output sorted by
 name, while `window` returns a clear unsupported-backend error. More compositor backends can be
