@@ -53,6 +53,7 @@ use crate::{
 
 const LEFT_BUTTON: u32 = 0x110;
 const SCROLL_SEAM_TICKS: u8 = 4;
+type PixelRect = (u32, u32, u32, u32);
 
 pub struct Background {
     pub info: OutputInfo,
@@ -1672,22 +1673,10 @@ fn draw_hud(
     let bar_width = (content_width + 24).min(width);
     let x = (width - bar_width) / 2;
     let y = height.saturating_sub(34);
-    fill_rounded_rect(
-        data,
-        width,
-        height,
-        (x, y, bar_width, 24),
-        6,
-        theme.background,
-    );
+    draw_hint_bar_background(data, width, height, (x, y, bar_width, 24), theme);
     let mut text_x = x + 12;
     for (index, (key, desc)) in items.into_iter().enumerate() {
-        draw_text_bold(data, width, height, text_x, y + 8, key, theme.accent);
-        text_x += bold_text_width(key);
-        draw_text(data, width, height, text_x, y + 8, " ", theme.text);
-        text_x += 6;
-        draw_text(data, width, height, text_x, y + 8, desc, theme.text);
-        text_x += text_width(desc);
+        text_x = draw_hint_item(data, width, height, text_x, y + 8, key, desc, theme);
         if index + 1 < items.len() {
             text_x += 18;
         }
@@ -1695,12 +1684,12 @@ fn draw_hud(
 }
 
 fn scroll_bar_geometry(width: u32, height: u32) -> (u32, u32, u32, u32) {
-    let bar_width = 330.min(width);
+    let bar_width = 300.min(width);
     (
         (width - bar_width) / 2,
-        height.saturating_sub(72),
+        height.saturating_sub(34),
         bar_width,
-        48.min(height),
+        24.min(height),
     )
 }
 
@@ -1713,62 +1702,101 @@ fn draw_scroll_bar(
     theme: Theme,
 ) {
     let bar = scroll_bar_geometry(width, height);
-    fill_rect(data, width, height, bar, theme.background);
-    fill_rect(
+    draw_hint_bar_background(data, width, height, bar, theme);
+    let (done, cancel) = scroll_action_geometry(width, height);
+    draw_hint_item(
         data,
         width,
         height,
-        (bar.0 + 12, bar.1 + 12, 54, 24),
-        theme.accent,
-    );
-    fill_rect(
-        data,
-        width,
-        height,
-        (bar.0 + 78, bar.1 + 12, 66, 24),
-        [70, 70, 70, 255],
-    );
-    draw_text(
-        data,
-        width,
-        height,
-        bar.0 + 22,
-        bar.1 + 20,
+        done.0,
+        bar.1 + 8,
+        "enter",
         "done",
-        [10, 10, 10, 255],
+        theme,
     );
-    draw_text(
+    let mut text_x = draw_hint_item(
         data,
         width,
         height,
-        bar.0 + 86,
-        bar.1 + 20,
+        cancel.0,
+        bar.1 + 8,
+        "esc",
         "cancel",
-        theme.text,
+        theme,
     );
+    text_x += 18;
     draw_text(
         data,
         width,
         height,
-        bar.0 + 158,
-        bar.1 + 20,
+        text_x,
+        bar.1 + 8,
         &format!("{shots} shots {rows}px"),
         theme.text,
     );
 }
 
 fn scroll_bar_hit(width: u32, height: u32, position: (f64, f64)) -> u8 {
-    let bar = scroll_bar_geometry(width, height);
     let (x, y) = (position.0 as u32, position.1 as u32);
-    if y >= bar.1 + 12 && y < bar.1 + 36 {
-        if x >= bar.0 + 12 && x < bar.0 + 66 {
-            return 1;
-        }
-        if x >= bar.0 + 78 && x < bar.0 + 144 {
-            return 2;
-        }
+    let (done, cancel) = scroll_action_geometry(width, height);
+    if point_in_rect(x, y, done) {
+        return 1;
+    }
+    if point_in_rect(x, y, cancel) {
+        return 2;
     }
     0
+}
+
+fn scroll_action_geometry(width: u32, height: u32) -> (PixelRect, PixelRect) {
+    let bar = scroll_bar_geometry(width, height);
+    let done_width = bold_text_width("enter") + 6 + text_width("done");
+    let cancel_width = bold_text_width("esc") + 6 + text_width("cancel");
+    let done = (bar.0 + 12, bar.1, done_width, bar.3);
+    let cancel = (done.0 + done.2 + 18, bar.1, cancel_width, bar.3);
+    (done, cancel)
+}
+
+fn point_in_rect(x: u32, y: u32, rect: (u32, u32, u32, u32)) -> bool {
+    x >= rect.0
+        && x < rect.0.saturating_add(rect.2)
+        && y >= rect.1
+        && y < rect.1.saturating_add(rect.3)
+}
+
+fn draw_hint_bar_background(
+    data: &mut [u8],
+    width: u32,
+    height: u32,
+    rect: (u32, u32, u32, u32),
+    theme: Theme,
+) {
+    fill_rounded_rect(data, width, height, rect, 6, theme.background);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_hint_item(
+    data: &mut [u8],
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    key: &str,
+    description: &str,
+    theme: Theme,
+) -> u32 {
+    draw_text_bold(data, width, height, x, y, key, theme.accent);
+    let description_x = x + bold_text_width(key) + 6;
+    draw_text(
+        data,
+        width,
+        height,
+        description_x,
+        y,
+        description,
+        theme.text,
+    );
+    description_x + text_width(description)
 }
 
 fn fill_rect(data: &mut [u8], width: u32, height: u32, rect: (u32, u32, u32, u32), color: [u8; 4]) {
@@ -1929,15 +1957,46 @@ mod tests {
     }
     #[test]
     fn toolbar_hit_testing() {
-        let bar = scroll_bar_geometry(800, 600);
+        let (done, cancel) = scroll_action_geometry(800, 600);
         assert_eq!(
-            scroll_bar_hit(800, 600, ((bar.0 + 20) as f64, (bar.1 + 20) as f64)),
+            scroll_bar_hit(
+                800,
+                600,
+                ((done.0 + done.2 / 2) as f64, (done.1 + done.3 / 2) as f64)
+            ),
             1
         );
         assert_eq!(
-            scroll_bar_hit(800, 600, ((bar.0 + 90) as f64, (bar.1 + 20) as f64)),
+            scroll_bar_hit(
+                800,
+                600,
+                (
+                    (cancel.0 + cancel.2 / 2) as f64,
+                    (cancel.1 + cancel.3 / 2) as f64
+                )
+            ),
             2
         );
+    }
+
+    #[test]
+    fn scroll_hint_bar_uses_shared_rounded_theme_style() {
+        let width = 400;
+        let height = 100;
+        let theme = Theme {
+            background: [21, 31, 41, 245],
+            text: [231, 232, 233, 255],
+            accent: [81, 151, 221, 255],
+        };
+        let mut pixels = vec![0; width as usize * height as usize * 4];
+        draw_scroll_bar(&mut pixels, width, height, 12, 3456, theme);
+        let bar = scroll_bar_geometry(width, height);
+        let corner = (bar.1 as usize * width as usize + bar.0 as usize) * 4;
+        let background =
+            ((bar.1 + bar.3 / 2) as usize * width as usize + (bar.0 + bar.2 / 2) as usize) * 4;
+        assert_eq!(&pixels[corner..corner + 4], &[0, 0, 0, 0]);
+        assert_eq!(&pixels[background..background + 4], &theme.background);
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel == theme.accent));
     }
 
     #[test]
