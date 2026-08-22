@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use crate::backend::BackendPreference;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CursorMode {
     Off,
@@ -163,6 +165,10 @@ pub struct Cli {
     /// Use colors from qt6ct, qt5ct, or KDE for interactive overlays.
     #[arg(long, conflicts_with = "gtk", global = true)]
     pub qt: bool,
+
+    /// Force a compositor backend instead of detecting it automatically.
+    #[arg(long = "be", value_enum, value_name = "BACKEND", global = true)]
+    pub backend: Option<BackendPreference>,
 }
 
 impl Cli {
@@ -183,7 +189,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, Command, OutputFormat};
+    use super::{BackendPreference, Cli, Command, OutputFormat};
 
     #[test]
     fn defaults_to_region() {
@@ -206,6 +212,15 @@ mod tests {
         assert!(qt.qt);
         assert!(!qt.gtk);
         assert!(Cli::try_parse_from(["dmsshot", "--gtk", "--qt"]).is_err());
+    }
+
+    #[test]
+    fn compositor_backend_can_be_forced_globally() {
+        let niri = Cli::try_parse_from(["dmsshot", "--be", "niri", "full"]).unwrap();
+        assert_eq!(niri.backend, Some(BackendPreference::Niri));
+        let kde = Cli::try_parse_from(["dmsshot", "window", "--be", "kde"]).unwrap();
+        assert_eq!(kde.backend, Some(BackendPreference::Kde));
+        assert!(Cli::try_parse_from(["dmsshot", "--be", "other"]).is_err());
     }
 
     #[test]

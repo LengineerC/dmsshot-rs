@@ -52,10 +52,8 @@ struct OcrMetadata<'a> {
 
 impl Application {
     pub fn new(cli: Cli) -> Self {
-        Self {
-            cli,
-            backend: DesktopBackend::detect(),
-        }
+        let backend = DesktopBackend::detect(cli.backend);
+        Self { cli, backend }
     }
 
     pub fn run(self) -> Result<()> {

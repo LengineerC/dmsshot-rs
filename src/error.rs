@@ -6,6 +6,8 @@ pub enum Error {
     Niri(String),
     #[error("KWin screenshot: {0}")]
     Kde(String),
+    #[error("requested compositor backend is unavailable: {0}")]
+    BackendUnavailable(String),
     #[error("focused-window capture is unavailable: no supported compositor backend was detected")]
     WindowCaptureUnsupported,
     #[error("Wayland: {0}")]

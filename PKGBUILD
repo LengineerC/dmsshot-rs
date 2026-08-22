@@ -2,7 +2,7 @@
 
 pkgname=dmsshot-rs
 pkgver=0.1.0
-pkgrel=7
+pkgrel=8
 pkgdesc='Native Wayland screenshot, scrolling capture, and OCR utility with niri and KWin integration'
 arch=('x86_64')
 url='https://github.com/LengineerC/dmsshot-rs'

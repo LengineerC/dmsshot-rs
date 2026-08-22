@@ -65,14 +65,17 @@ dmsshot-rs window          # focused window (niri or KDE Plasma/KWin)
 dmsshot-rs scroll          # interactive scrolling capture
 dmsshot-rs ocr             # recognize text in an interactive region
 dmsshot-rs list            # output information
+dmsshot-rs --be niri full  # force the niri backend
+dmsshot-rs --be kde window # force the KDE/KWin backend
 ```
 
 Run `dmsshot-rs --help` for image format, destination, cursor, JSON, and stdout options. Region mode
 uses Enter or Space to confirm, Escape to cancel, `P` to toggle the captured pointer, and Shift to
 constrain a drag to a square. Scroll mode finishes with Enter or the Done button. Successful file
 captures are copied and notified by default; use `--no-clipboard` or `--no-notify` to disable either
-integration. The `window` command relies on niri's native `ScreenshotWindow` action, which always
-sets the clipboard as an inherent compositor side effect, including with `--no-clipboard`.
+integration. When niri is selected, the `window` command relies on niri's native
+`ScreenshotWindow` action, which always sets the clipboard as an inherent compositor side effect,
+including with `--no-clipboard`; the KDE window path does not have this side effect.
 Left-clicking a completion notification opens the captured image; its Open Folder
 action opens the destination directory. Binary `--stdout` output remains free of clipboard and
 notification side effects.
@@ -95,6 +98,13 @@ viewporter, and `wl_seat`. These commands no longer require `NIRI_SOCKET`.
 
 niri is detected automatically and used as an optional backend for focused-output discovery and
 focused-window capture.
+
+Backend selection is automatic by default: dmsshot-rs prefers the common wlr-screencopy path when
+it is available, then falls back to KWin ScreenShot2. Use the global `--be niri` or `--be kde`
+option to force one compositor backend. Forced niri requires `NIRI_SOCKET` and
+`wlr-screencopy-unstable-v1`; forced KDE requires the KWin ScreenShot2 D-Bus service. An unavailable
+forced backend is reported as an error instead of silently falling back. The option may appear
+before or after the command.
 
 On KDE Plasma Wayland, dmsshot-rs automatically uses KWin's
 `org.kde.KWin.ScreenShot2` D-Bus interface when wlr screencopy is unavailable. `full` captures the

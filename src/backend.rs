@@ -1,6 +1,8 @@
 mod kde;
 mod niri;
 
+use clap::ValueEnum;
+
 use crate::{
     error::{Error, Result},
     imagebuf::ImageBuffer,
@@ -26,9 +28,16 @@ pub struct WindowCapture {
     pub clipboard_already_set: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum BackendPreference {
+    Niri,
+    Kde,
+}
+
 pub struct DesktopBackend {
     kde: Option<kde::KdeBackend>,
     niri: Option<niri::NiriBackend>,
+    preference: Option<BackendPreference>,
 }
 
 pub trait CaptureSource {
@@ -54,49 +63,115 @@ pub enum CaptureSession {
 }
 
 impl DesktopBackend {
-    pub fn detect() -> Self {
+    pub fn detect(preference: Option<BackendPreference>) -> Self {
         Self {
-            kde: kde::KdeBackend::detect(),
-            niri: niri::NiriBackend::detect(),
+            kde: (preference != Some(BackendPreference::Niri))
+                .then(kde::KdeBackend::detect)
+                .flatten(),
+            niri: (preference != Some(BackendPreference::Kde))
+                .then(niri::NiriBackend::detect)
+                .flatten(),
+            preference,
         }
     }
 
     pub fn capture_session(&self) -> Result<CaptureSession> {
         let wayland = WaylandCapture::connect()?;
-        if wayland.supports_screencopy() {
-            return Ok(CaptureSession::Wlr(Box::new(wayland)));
+        match self.preference {
+            Some(BackendPreference::Kde) => {
+                let capture = self.kde.clone().ok_or_else(|| {
+                    Error::BackendUnavailable(
+                        "KDE was selected with --be, but org.kde.KWin.ScreenShot2 was not found"
+                            .into(),
+                    )
+                })?;
+                Ok(CaptureSession::Kde {
+                    outputs: wayland.outputs(),
+                    capture,
+                })
+            }
+            Some(BackendPreference::Niri) => {
+                if self.niri.is_none() {
+                    return Err(Error::BackendUnavailable(
+                        "niri was selected with --be, but NIRI_SOCKET is not set".into(),
+                    ));
+                }
+                if !wayland.supports_screencopy() {
+                    return Err(Error::BackendUnavailable(
+                        "niri was selected with --be, but wlr-screencopy-unstable-v1 is unavailable"
+                            .into(),
+                    ));
+                }
+                Ok(CaptureSession::Wlr(Box::new(wayland)))
+            }
+            None if wayland.supports_screencopy() => Ok(CaptureSession::Wlr(Box::new(wayland))),
+            None => {
+                if let Some(capture) = self.kde.clone() {
+                    Ok(CaptureSession::Kde {
+                        outputs: wayland.outputs(),
+                        capture,
+                    })
+                } else {
+                    Err(Error::MissingProtocol("wlr-screencopy-unstable-v1"))
+                }
+            }
         }
-        if let Some(capture) = self.kde.clone() {
-            return Ok(CaptureSession::Kde {
-                outputs: wayland.outputs(),
-                capture,
-            });
-        }
-        Err(Error::MissingProtocol("wlr-screencopy-unstable-v1"))
     }
 
     pub fn focused_output_name(&self) -> Option<String> {
+        if self.preference == Some(BackendPreference::Kde) {
+            return None;
+        }
         self.niri
             .as_ref()
             .and_then(|backend| backend.focused_output_name().ok().flatten())
     }
 
     pub fn capture_focused_window(&self, show_pointer: bool) -> Result<WindowCapture> {
-        if let Some(backend) = &self.niri {
-            return Ok(WindowCapture {
-                image: backend.capture_focused_window(show_pointer)?,
-                // ScreenshotWindow always sets niri's clipboard and offers no switch to disable it.
-                clipboard_already_set: true,
-            });
+        match self.preference {
+            Some(BackendPreference::Niri) => {
+                let backend = self.niri.as_ref().ok_or_else(|| {
+                    Error::BackendUnavailable(
+                        "niri was selected with --be, but NIRI_SOCKET is not set".into(),
+                    )
+                })?;
+                niri_window_capture(backend, show_pointer)
+            }
+            Some(BackendPreference::Kde) => {
+                let backend = self.kde.as_ref().ok_or_else(|| {
+                    Error::BackendUnavailable(
+                        "KDE was selected with --be, but org.kde.KWin.ScreenShot2 was not found"
+                            .into(),
+                    )
+                })?;
+                kde_window_capture(backend, show_pointer)
+            }
+            None => {
+                if let Some(backend) = &self.niri {
+                    niri_window_capture(backend, show_pointer)
+                } else if let Some(backend) = &self.kde {
+                    kde_window_capture(backend, show_pointer)
+                } else {
+                    Err(Error::WindowCaptureUnsupported)
+                }
+            }
         }
-        if let Some(backend) = &self.kde {
-            return Ok(WindowCapture {
-                image: backend.capture_active_window(show_pointer)?,
-                clipboard_already_set: false,
-            });
-        }
-        Err(Error::WindowCaptureUnsupported)
     }
+}
+
+fn niri_window_capture(backend: &niri::NiriBackend, show_pointer: bool) -> Result<WindowCapture> {
+    Ok(WindowCapture {
+        image: backend.capture_focused_window(show_pointer)?,
+        // ScreenshotWindow always sets niri's clipboard and offers no switch to disable it.
+        clipboard_already_set: true,
+    })
+}
+
+fn kde_window_capture(backend: &kde::KdeBackend, show_pointer: bool) -> Result<WindowCapture> {
+    Ok(WindowCapture {
+        image: backend.capture_active_window(show_pointer)?,
+        clipboard_already_set: false,
+    })
 }
 
 impl CaptureSession {
