@@ -48,7 +48,7 @@ use crate::{
     backend::{CaptureSource, OutputInfo},
     error::{Error, Result},
     imagebuf::{ImageBuffer, Region},
-    stitch::Stitcher,
+    stitch::{Stitcher, duplicate_frame},
 };
 
 const LEFT_BUTTON: u32 = 0x110;
@@ -118,11 +118,15 @@ enum Phase {
 struct ScrollState {
     region: Region,
     local_region: Region,
+    bar: Option<PixelRect>,
     output: OutputInfo,
     interval: Duration,
     next_tick: Instant,
     stitcher: Option<Stitcher>,
     kept: usize,
+    previous_signature: Vec<f32>,
+    previous_placed: bool,
+    unmatched: bool,
     unmatched_ticks: u8,
     failures: u8,
 }
@@ -269,8 +273,9 @@ pub fn select_region(
         .map_err(|err| Error::Wayland(format!("event source: {err}")))?;
 
     while state.running {
+        let timeout = state.dispatch_timeout();
         event_loop
-            .dispatch(Duration::from_millis(10), &mut state)
+            .dispatch(timeout, &mut state)
             .map_err(|err| Error::Wayland(format!("selector dispatch: {err}")))?;
         if state.scroll_due() {
             state.capture_scroll_frame(capture, &qh);
@@ -469,14 +474,17 @@ impl SelectorState {
                 );
                 clear_rect(&mut rgba, width, height, rect);
                 draw_outside_border(&mut rgba, width, height, rect, self.theme.accent);
-                draw_scroll_bar(
-                    &mut rgba,
-                    width,
-                    height,
-                    scroll.kept,
-                    scroll.stitcher.as_ref().map_or(0, Stitcher::rows),
-                    self.theme,
-                );
+                if let Some(bar) = scroll.bar {
+                    draw_scroll_bar(
+                        &mut rgba,
+                        width,
+                        height,
+                        bar,
+                        scroll.kept,
+                        scroll.stitcher.as_ref().map_or(0, Stitcher::rows),
+                        self.theme,
+                    );
+                }
             }
             rgba
         }
@@ -551,14 +559,29 @@ impl SelectorState {
             y: global.y - self.outputs[index].y,
             ..global.clone()
         };
+        let surface = &self.surfaces[index];
+        let bar = scroll_bar_geometry(
+            surface.logical_width,
+            surface.logical_height,
+            (
+                local_region.x.max(0) as u32,
+                local_region.y.max(0) as u32,
+                local_region.width.max(1) as u32,
+                local_region.height.max(1) as u32,
+            ),
+        );
         self.scroll = Some(ScrollState {
             region: global,
             local_region,
+            bar,
             output: self.outputs[index].clone(),
             interval: self.interval,
             next_tick: Instant::now(),
             stitcher: None,
             kept: 0,
+            previous_signature: Vec::new(),
+            previous_placed: false,
+            unmatched: false,
             unmatched_ticks: 0,
             failures: 0,
         });
@@ -570,9 +593,10 @@ impl SelectorState {
     fn set_scroll_input_region(&self, selected: usize, qh: &QueueHandle<Self>) {
         for (index, surface) in self.surfaces.iter().enumerate() {
             let region = self.compositor.wl_compositor().create_region(qh, ());
-            if index == selected {
-                let (x, y, width, height) =
-                    scroll_bar_geometry(surface.logical_width, surface.logical_height);
+            if index == selected
+                && let Some((x, y, width, height)) =
+                    self.scroll.as_ref().and_then(|scroll| scroll.bar)
+            {
                 region.add(x as i32, y as i32, width as i32, height as i32);
             }
             surface.layer.wl_surface().set_input_region(Some(&region));
@@ -589,55 +613,122 @@ impl SelectorState {
             })
     }
 
+    fn dispatch_timeout(&self) -> Duration {
+        let default = Duration::from_millis(10);
+        if self.phase != Phase::Scroll {
+            return default;
+        }
+        let Some(scroll) = &self.scroll else {
+            return default;
+        };
+        if scroll.stitcher.as_ref().is_some_and(Stitcher::is_full) {
+            return default;
+        }
+        scroll
+            .next_tick
+            .saturating_duration_since(Instant::now())
+            .min(default)
+    }
+
     fn capture_scroll_frame(&mut self, capture: &mut dyn CaptureSource, qh: &QueueHandle<Self>) {
         let Some(scroll) = &mut self.scroll else {
             return;
         };
-        let result = capture.capture_region(
+        let image = match capture.capture_region(
             &scroll.output,
             scroll.local_region.x,
             scroll.local_region.y,
             scroll.local_region.width,
             scroll.local_region.height,
             false,
-        );
-        scroll.next_tick = Instant::now() + scroll.interval;
-        match result.and_then(|image| {
-            let stitcher = scroll
-                .stitcher
-                .get_or_insert_with(|| Stitcher::new(image.width));
-            stitcher.push(&image).map(|result| (image, result))
-        }) {
-            Ok((image, result)) => {
+        ) {
+            Ok(image) => {
                 scroll.failures = 0;
-                if result.placed {
-                    scroll.unmatched_ticks = 0;
-                    if result.added_rows > 0 {
-                        scroll.kept += 1;
-                    }
-                } else {
-                    scroll.unmatched_ticks += 1;
-                    if scroll.unmatched_ticks >= SCROLL_SEAM_TICKS {
-                        if let Ok(added) = scroll.stitcher.as_mut().unwrap().seam_append(&image)
-                            && added > 0
-                        {
-                            scroll.kept += 1;
-                        }
-                        scroll.unmatched_ticks = 0;
-                    }
-                }
-                if (!result.placed || result.added_rows > 0)
-                    && let Some(index) = self.selection.surface
-                {
-                    self.redraw(index, qh);
-                }
+                image
             }
             Err(error) => {
                 scroll.failures += 1;
+                scroll.next_tick = Instant::now() + scroll.interval;
                 if scroll.failures >= 5 {
                     self.error = Some(error);
                     self.running = false;
                 }
+                return;
+            }
+        };
+        scroll.next_tick = Instant::now() + scroll.interval;
+
+        let stitcher = scroll
+            .stitcher
+            .get_or_insert_with(|| Stitcher::new(image.width));
+        let analysis = match stitcher.analyze(&image) {
+            Ok(analysis) => analysis,
+            Err(error) => {
+                self.error = Some(error);
+                self.running = false;
+                return;
+            }
+        };
+        let signature = analysis.signature().to_vec();
+        let duplicate = duplicate_frame(&signature, &scroll.previous_signature);
+        scroll.previous_signature = signature;
+
+        // Match DMS: while content is moving, capture again at compositor speed. The configured
+        // interval only paces frames while the page is idle.
+        if !duplicate {
+            scroll.next_tick = Instant::now();
+        }
+
+        let added = if duplicate && scroll.unmatched {
+            scroll.unmatched_ticks += 1;
+            if scroll.unmatched_ticks < SCROLL_SEAM_TICKS {
+                return;
+            }
+            let result = match stitcher.push_analyzed(&image, &analysis) {
+                Ok(result) => result,
+                Err(error) => {
+                    self.error = Some(error);
+                    self.running = false;
+                    return;
+                }
+            };
+            let added = if result.placed {
+                result.added_rows
+            } else {
+                match stitcher.seam_append_analyzed(&image, &analysis) {
+                    Ok(added) => added,
+                    Err(error) => {
+                        self.error = Some(error);
+                        self.running = false;
+                        return;
+                    }
+                }
+            };
+            scroll.previous_placed = true;
+            scroll.unmatched = false;
+            scroll.unmatched_ticks = 0;
+            added
+        } else if duplicate && scroll.previous_placed {
+            return;
+        } else {
+            let result = match stitcher.push_analyzed(&image, &analysis) {
+                Ok(result) => result,
+                Err(error) => {
+                    self.error = Some(error);
+                    self.running = false;
+                    return;
+                }
+            };
+            scroll.previous_placed = result.placed;
+            scroll.unmatched = !result.placed;
+            scroll.unmatched_ticks = 0;
+            result.added_rows
+        };
+
+        if added > 0 {
+            scroll.kept += 1;
+            if let Some(index) = self.selection.surface {
+                self.redraw(index, qh);
             }
         }
     }
@@ -845,19 +936,14 @@ impl PointerHandler for SelectorState {
                 }
                 PointerEventKind::Press { button, .. } if button == LEFT_BUTTON => {
                     if self.phase == Phase::Scroll {
-                        if scroll_bar_hit(
-                            self.surfaces[index].logical_width,
-                            self.surfaces[index].logical_height,
-                            event.position,
-                        ) == 1
-                        {
+                        let hit = self
+                            .scroll
+                            .as_ref()
+                            .and_then(|scroll| scroll.bar)
+                            .map_or(0, |bar| scroll_bar_hit(bar, event.position));
+                        if hit == 1 {
                             self.finish_scroll();
-                        } else if scroll_bar_hit(
-                            self.surfaces[index].logical_width,
-                            self.surfaces[index].logical_height,
-                            event.position,
-                        ) == 2
-                        {
+                        } else if hit == 2 {
                             self.cancelled = true;
                             self.running = false;
                         }
@@ -1683,27 +1769,67 @@ fn draw_hud(
     }
 }
 
-fn scroll_bar_geometry(width: u32, height: u32) -> (u32, u32, u32, u32) {
+fn scroll_bar_geometry(width: u32, height: u32, avoid: PixelRect) -> Option<PixelRect> {
+    if width == 0 || height == 0 {
+        return None;
+    }
     let bar_width = 300.min(width);
-    (
-        (width - bar_width) / 2,
-        height.saturating_sub(34),
+    let bar_height = 24.min(height);
+    let x = (width - bar_width) / 2;
+    let bottom = (
+        x,
+        height.saturating_sub(bar_height.saturating_add(24)),
         bar_width,
-        24.min(height),
-    )
+        bar_height,
+    );
+    let avoid = expand_rect(avoid, width, height, 3);
+    if !rects_overlap(bottom, avoid) {
+        return Some(bottom);
+    }
+
+    let top = (
+        x,
+        24.min(height.saturating_sub(bar_height)),
+        bar_width,
+        bar_height,
+    );
+    (!rects_overlap(top, avoid)).then_some(top)
+}
+
+fn expand_rect(rect: PixelRect, width: u32, height: u32, padding: u32) -> PixelRect {
+    let x = rect.0.saturating_sub(padding);
+    let y = rect.1.saturating_sub(padding);
+    let right = rect
+        .0
+        .saturating_add(rect.2)
+        .saturating_add(padding)
+        .min(width);
+    let bottom = rect
+        .1
+        .saturating_add(rect.3)
+        .saturating_add(padding)
+        .min(height);
+    (x, y, right.saturating_sub(x), bottom.saturating_sub(y))
+}
+
+fn rects_overlap(left: PixelRect, right: PixelRect) -> bool {
+    left.0 < right.0.saturating_add(right.2)
+        && left.0.saturating_add(left.2) > right.0
+        && left.1 < right.1.saturating_add(right.3)
+        && left.1.saturating_add(left.3) > right.1
 }
 
 fn draw_scroll_bar(
     data: &mut [u8],
     width: u32,
     height: u32,
+    bar: PixelRect,
     shots: usize,
     rows: usize,
     theme: Theme,
 ) {
-    let bar = scroll_bar_geometry(width, height);
     draw_hint_bar_background(data, width, height, bar, theme);
-    let (done, cancel) = scroll_action_geometry(width, height);
+    let (done, cancel) = scroll_action_geometry(bar);
     draw_hint_item(
         data,
         width,
@@ -1736,9 +1862,9 @@ fn draw_scroll_bar(
     );
 }
 
-fn scroll_bar_hit(width: u32, height: u32, position: (f64, f64)) -> u8 {
+fn scroll_bar_hit(bar: PixelRect, position: (f64, f64)) -> u8 {
     let (x, y) = (position.0 as u32, position.1 as u32);
-    let (done, cancel) = scroll_action_geometry(width, height);
+    let (done, cancel) = scroll_action_geometry(bar);
     if point_in_rect(x, y, done) {
         return 1;
     }
@@ -1748,8 +1874,7 @@ fn scroll_bar_hit(width: u32, height: u32, position: (f64, f64)) -> u8 {
     0
 }
 
-fn scroll_action_geometry(width: u32, height: u32) -> (PixelRect, PixelRect) {
-    let bar = scroll_bar_geometry(width, height);
+fn scroll_action_geometry(bar: PixelRect) -> (PixelRect, PixelRect) {
     let done_width = bold_text_width("enter") + 6 + text_width("done");
     let cancel_width = bold_text_width("esc") + 6 + text_width("cancel");
     let done = (bar.0 + 12, bar.1, done_width, bar.3);
@@ -1957,19 +2082,18 @@ mod tests {
     }
     #[test]
     fn toolbar_hit_testing() {
-        let (done, cancel) = scroll_action_geometry(800, 600);
+        let bar = scroll_bar_geometry(800, 600, (200, 100, 400, 200)).unwrap();
+        let (done, cancel) = scroll_action_geometry(bar);
         assert_eq!(
             scroll_bar_hit(
-                800,
-                600,
+                bar,
                 ((done.0 + done.2 / 2) as f64, (done.1 + done.3 / 2) as f64)
             ),
             1
         );
         assert_eq!(
             scroll_bar_hit(
-                800,
-                600,
+                bar,
                 (
                     (cancel.0 + cancel.2 / 2) as f64,
                     (cancel.1 + cancel.3 / 2) as f64
@@ -1989,14 +2113,27 @@ mod tests {
             accent: [81, 151, 221, 255],
         };
         let mut pixels = vec![0; width as usize * height as usize * 4];
-        draw_scroll_bar(&mut pixels, width, height, 12, 3456, theme);
-        let bar = scroll_bar_geometry(width, height);
+        let bar = scroll_bar_geometry(width, height, (50, 10, 100, 30)).unwrap();
+        draw_scroll_bar(&mut pixels, width, height, bar, 12, 3456, theme);
         let corner = (bar.1 as usize * width as usize + bar.0 as usize) * 4;
         let background =
             ((bar.1 + bar.3 / 2) as usize * width as usize + (bar.0 + bar.2 / 2) as usize) * 4;
         assert_eq!(&pixels[corner..corner + 4], &[0, 0, 0, 0]);
         assert_eq!(&pixels[background..background + 4], &theme.background);
         assert!(pixels.chunks_exact(4).any(|pixel| pixel == theme.accent));
+    }
+
+    #[test]
+    fn scroll_bar_moves_above_a_bottom_capture_region() {
+        let capture = (100, 450, 600, 140);
+        let bar = scroll_bar_geometry(800, 600, capture).unwrap();
+        assert_eq!(bar.1, 24);
+        assert!(!rects_overlap(bar, expand_rect(capture, 800, 600, 3)));
+    }
+
+    #[test]
+    fn scroll_bar_is_hidden_when_the_capture_region_fills_the_output() {
+        assert_eq!(scroll_bar_geometry(800, 600, (0, 0, 800, 600)), None);
     }
 
     #[test]
