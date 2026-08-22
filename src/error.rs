@@ -2,10 +2,12 @@ use std::{io, path::PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("niri is not running (NIRI_SOCKET is not set)")]
-    NotNiri,
     #[error("niri IPC: {0}")]
     Niri(String),
+    #[error("KWin screenshot: {0}")]
+    Kde(String),
+    #[error("focused-window capture is unavailable: no supported compositor backend was detected")]
+    WindowCaptureUnsupported,
     #[error("Wayland: {0}")]
     Wayland(String),
     #[error("required Wayland protocol is unavailable: {0}")]

@@ -2,8 +2,8 @@
 
 pkgname=dmsshot-rs
 pkgver=0.1.0
-pkgrel=4
-pkgdesc='Native Rust screenshot, scrolling capture, and OCR utility for niri'
+pkgrel=7
+pkgdesc='Native Wayland screenshot, scrolling capture, and OCR utility with niri and KWin integration'
 arch=('x86_64')
 url='https://github.com/LengineerC/dmsshot-rs'
 license=('MIT' 'Apache-2.0')
@@ -54,6 +54,8 @@ package() {
         "$pkgdir/usr/share/licenses/$pkgname/LICENCE"
     install -Dm644 "$startdir/README.md" \
         "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 "$startdir/data/dmsshot-rs.desktop" \
+        "$pkgdir/usr/share/applications/dmsshot-rs.desktop"
     install -Dm644 "$srcdir/ch_PP-OCRv4_det_infer.onnx" \
         "$pkgdir/usr/share/$pkgname/models/ch_PP-OCRv4_det_infer.onnx"
     install -Dm644 "$srcdir/ch_ppocr_mobile_v2.0_cls_infer.onnx" \

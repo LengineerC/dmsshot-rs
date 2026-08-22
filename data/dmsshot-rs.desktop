@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=dmsshot-rs
+GenericName=Screenshot Capture Utility
+Comment=Native Wayland screenshot, scrolling capture, and OCR utility
+Exec=dmsshot-rs
+Icon=camera-photo
+Terminal=false
+Type=Application
+NoDisplay=true
+Categories=Graphics;
+X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2

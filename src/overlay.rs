@@ -45,11 +45,10 @@ use wayland_protocols::wp::viewporter::client::{
 };
 
 use crate::{
+    backend::{CaptureSource, OutputInfo},
     error::{Error, Result},
     imagebuf::{ImageBuffer, Region},
-    niri::OutputInfo,
     stitch::Stitcher,
-    wayland::WaylandCapture,
 };
 
 const LEFT_BUTTON: u32 = 0x110;
@@ -67,6 +66,13 @@ pub struct SelectorOptions {
     pub interval: Duration,
     pub initial: Region,
     pub show_cursor: bool,
+    pub theme_source: ThemeSource,
+}
+
+#[derive(Clone, Copy)]
+pub enum ThemeSource {
+    Gtk,
+    Qt,
 }
 
 struct Surface {
@@ -155,7 +161,7 @@ struct SelectorState {
 pub fn select_region(
     backgrounds: Vec<Background>,
     options: SelectorOptions,
-    capture: &mut WaylandCapture,
+    capture: &mut dyn CaptureSource,
 ) -> Result<Option<ImageBuffer>> {
     let connection = Connection::connect_to_env()
         .map_err(|err| Error::Wayland(format!("selector connect: {err}")))?;
@@ -203,7 +209,7 @@ pub fn select_region(
         cancelled: false,
         result: None,
         error: None,
-        theme: Theme::load(),
+        theme: Theme::load(options.theme_source),
     };
     event_queue
         .roundtrip(&mut state)
@@ -582,7 +588,7 @@ impl SelectorState {
             })
     }
 
-    fn capture_scroll_frame(&mut self, capture: &mut WaylandCapture, qh: &QueueHandle<Self>) {
+    fn capture_scroll_frame(&mut self, capture: &mut dyn CaptureSource, qh: &QueueHandle<Self>) {
         let Some(scroll) = &mut self.scroll else {
             return;
         };
@@ -1085,8 +1091,12 @@ impl Default for Theme {
     }
 }
 impl Theme {
-    fn load() -> Self {
-        gtk_theme_colors().unwrap_or_default()
+    fn load(source: ThemeSource) -> Self {
+        match source {
+            ThemeSource::Gtk => gtk_theme_colors(),
+            ThemeSource::Qt => qt_theme_colors(),
+        }
+        .unwrap_or_default()
     }
 }
 
@@ -1113,6 +1123,188 @@ fn gtk_theme_colors() -> Option<Theme> {
         text: [text[0], text[1], text[2], 255],
         accent: [accent[0], accent[1], accent[2], 255],
     })
+}
+
+type Ini = HashMap<String, HashMap<String, String>>;
+
+fn qt_theme_colors() -> Option<Theme> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|path| path.join(".config")))?;
+
+    for toolkit in ["qt6ct", "qt5ct"] {
+        let config_path = config_home.join(toolkit).join(format!("{toolkit}.conf"));
+        let Some(ini) = load_ini(&config_path) else {
+            continue;
+        };
+        if let Some(path) = ini_value(&ini, "appearance", "color_scheme_path")
+            .and_then(|value| resolve_qtct_palette_path(value, &config_path, home.as_deref()))
+            && let Some(theme) = load_qt_theme(&path)
+        {
+            return Some(theme);
+        }
+        if let Some(theme) = theme_from_qt_ini(&ini) {
+            return Some(theme);
+        }
+    }
+
+    let kdeglobals = config_home.join("kdeglobals");
+    let ini = load_ini(&kdeglobals)?;
+    if let Some(theme) = theme_from_qt_ini(&ini) {
+        return Some(theme);
+    }
+    let scheme = ini_value(&ini, "general", "colorscheme")?;
+    kde_color_scheme_paths(scheme, home.as_deref())
+        .into_iter()
+        .find_map(|path| load_qt_theme(&path))
+}
+
+fn load_qt_theme(path: &Path) -> Option<Theme> {
+    theme_from_qt_ini(&load_ini(path)?)
+}
+
+fn load_ini(path: &Path) -> Option<Ini> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|contents| parse_ini(&contents))
+}
+
+fn parse_ini(contents: &str) -> Ini {
+    let mut ini = Ini::new();
+    let mut section = String::new();
+    for line in contents.lines() {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(name) = line
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            section = name.trim().to_ascii_lowercase();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        ini.entry(section.clone())
+            .or_default()
+            .insert(key.trim().to_ascii_lowercase(), value.trim().to_owned());
+    }
+    ini
+}
+
+fn ini_value<'a>(ini: &'a Ini, section: &str, key: &str) -> Option<&'a str> {
+    ini.get(&section.to_ascii_lowercase())?
+        .get(&key.to_ascii_lowercase())
+        .map(String::as_str)
+}
+
+fn theme_from_qt_ini(ini: &Ini) -> Option<Theme> {
+    let kde_background = ini_color(ini, "colors:window", "backgroundnormal")
+        .or_else(|| ini_color(ini, "colors:view", "backgroundnormal"));
+    let kde_text = ini_color(ini, "colors:window", "foregroundnormal")
+        .or_else(|| ini_color(ini, "colors:view", "foregroundnormal"));
+    let kde_accent = ini_color(ini, "colors:selection", "backgroundnormal");
+    if let (Some(background), Some(text), Some(accent)) = (kde_background, kde_text, kde_accent) {
+        return Some(theme_from_colors(background, text, accent));
+    }
+
+    let active = ini_value(ini, "colorscheme", "active_colors")?;
+    let colors: Vec<_> = active.split(',').filter_map(parse_qt_color).collect();
+    if colors.len() <= 12 {
+        return None;
+    }
+    Some(theme_from_colors(colors[10], colors[0], colors[12]))
+}
+
+fn ini_color(ini: &Ini, section: &str, key: &str) -> Option<[u8; 3]> {
+    parse_qt_color(ini_value(ini, section, key)?)
+}
+
+fn theme_from_colors(background: [u8; 3], text: [u8; 3], accent: [u8; 3]) -> Theme {
+    Theme {
+        background: [background[0], background[1], background[2], 245],
+        text: [text[0], text[1], text[2], 255],
+        accent: [accent[0], accent[1], accent[2], 255],
+    }
+}
+
+fn parse_qt_color(value: &str) -> Option<[u8; 3]> {
+    let value = value.trim().trim_matches(['\'', '"']);
+    if value.starts_with("rgb(") || value.starts_with("rgba(") {
+        return parse_css_color(value);
+    }
+    if let Some(hex) = value.strip_prefix('#') {
+        return match hex.len() {
+            // QColor serializes alpha first: #AARRGGBB.
+            8 => Some([
+                u8::from_str_radix(&hex[2..4], 16).ok()?,
+                u8::from_str_radix(&hex[4..6], 16).ok()?,
+                u8::from_str_radix(&hex[6..8], 16).ok()?,
+            ]),
+            6 => Some([
+                u8::from_str_radix(&hex[0..2], 16).ok()?,
+                u8::from_str_radix(&hex[2..4], 16).ok()?,
+                u8::from_str_radix(&hex[4..6], 16).ok()?,
+            ]),
+            3 => parse_css_color(value),
+            _ => None,
+        };
+    }
+    let components = value
+        .split(',')
+        .map(|part| part.trim().parse::<u8>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    (components.len() == 3).then(|| [components[0], components[1], components[2]])
+}
+
+fn resolve_qtct_palette_path(value: &str, config: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let value = value.trim().trim_matches(['\'', '"']);
+    if value.is_empty() || value.starts_with(":/") {
+        return None;
+    }
+    let expanded = if let Some(suffix) = value.strip_prefix("~/") {
+        home?.join(suffix)
+    } else {
+        PathBuf::from(value)
+    };
+    Some(if expanded.is_absolute() {
+        expanded
+    } else {
+        config
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(expanded)
+    })
+}
+
+fn kde_color_scheme_paths(name: &str, home: Option<&Path>) -> Vec<PathBuf> {
+    let filename = if name.ends_with(".colors") {
+        name.to_owned()
+    } else {
+        format!("{name}.colors")
+    };
+    let mut roots = Vec::new();
+    if let Some(root) = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.map(|path| path.join(".local/share")))
+    {
+        roots.push(root);
+    }
+    if let Some(value) = std::env::var_os("XDG_DATA_DIRS") {
+        roots.extend(std::env::split_paths(&value));
+    } else {
+        roots.extend([
+            PathBuf::from("/usr/local/share"),
+            PathBuf::from("/usr/share"),
+        ]);
+    }
+    roots
+        .into_iter()
+        .map(|root| root.join("color-schemes").join(&filename))
+        .collect()
 }
 
 fn gtk_css_paths() -> Vec<PathBuf> {
@@ -1805,6 +1997,45 @@ mod tests {
         );
         assert_eq!(parse_css_color("#abc"), Some([0xaa, 0xbb, 0xcc]));
         assert_eq!(parse_css_color("rgba(12, 34, 56, 0.5)"), Some([12, 34, 56]));
+    }
+
+    #[test]
+    fn qtct_active_palette_uses_window_text_and_highlight_roles() {
+        let ini = parse_ini(
+            "[ColorScheme]\n\
+             active_colors=#fff0f1f2,#ff010101,#ff020202,#ff030303,#ff040404,\
+             #ff050505,#ff060606,#ff070707,#ff080808,#ff090909,#ff202122,\
+             #ff111111,#ff336699\n",
+        );
+        let theme = theme_from_qt_ini(&ini).unwrap();
+        assert_eq!(theme.background, [0x20, 0x21, 0x22, 245]);
+        assert_eq!(theme.text, [0xf0, 0xf1, 0xf2, 255]);
+        assert_eq!(theme.accent, [0x33, 0x66, 0x99, 255]);
+    }
+
+    #[test]
+    fn kde_color_groups_are_parsed_case_insensitively() {
+        let ini = parse_ini(
+            "[Colors:Window]\nBackgroundNormal=32, 33, 34\nForegroundNormal=240,241,242\n\
+             [Colors:Selection]\nBackgroundNormal=51,102,153\n",
+        );
+        let theme = theme_from_qt_ini(&ini).unwrap();
+        assert_eq!(theme.background, [32, 33, 34, 245]);
+        assert_eq!(theme.text, [240, 241, 242, 255]);
+        assert_eq!(theme.accent, [51, 102, 153, 255]);
+        assert_eq!(parse_qt_color("#80112233"), Some([0x11, 0x22, 0x33]));
+    }
+
+    #[test]
+    fn qtct_relative_palette_path_is_resolved_from_config() {
+        assert_eq!(
+            resolve_qtct_palette_path(
+                "colors/dark.conf",
+                Path::new("/home/test/.config/qt6ct/qt6ct.conf"),
+                Some(Path::new("/home/test")),
+            ),
+            Some(PathBuf::from("/home/test/.config/qt6ct/colors/dark.conf"))
+        );
     }
 
     #[test]

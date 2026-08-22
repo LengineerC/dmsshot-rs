@@ -1,7 +1,9 @@
 # dmsshot-rs
 
-Native Rust screenshot utility for niri. It uses Wayland screencopy and layer-shell directly; no
-`grim` or `slurp` process is required.
+Native Rust screenshot utility for Wayland compositors that provide wlr screencopy and layer-shell.
+It uses those protocols directly, so no `grim` or `slurp` process is required. Optional compositor
+backends provide features that are not available through common Wayland protocols. niri and KDE
+Plasma/KWin are supported.
 
 ## Relationship to DankMaterialShell
 
@@ -56,10 +58,10 @@ system paths.
 
 ```sh
 dmsshot-rs                 # interactive region
-dmsshot-rs full            # focused output
+dmsshot-rs full            # focused output when known, otherwise first output
 dmsshot-rs all             # composite every output
 dmsshot-rs output DP-1     # named output
-dmsshot-rs window          # focused niri window
+dmsshot-rs window          # focused window (niri or KDE Plasma/KWin)
 dmsshot-rs scroll          # interactive scrolling capture
 dmsshot-rs ocr             # recognize text in an interactive region
 dmsshot-rs list            # output information
@@ -84,6 +86,32 @@ current directory.
 The default format is PNG and the generated filename is
 `screenshot_YYYY-MM-DD_HH-MM-SS.png`, using local time. Selecting JPEG or PPM changes the filename
 extension accordingly, while `--filename` overrides the generated name.
+
+## Wayland and compositor backends
+
+Output discovery uses `wl_output` and `xdg-output`; screenshot pixels use
+`wlr-screencopy-unstable-v1`. Region, scrolling, and OCR selection use layer-shell, `wl_shm`,
+viewporter, and `wl_seat`. These commands no longer require `NIRI_SOCKET`.
+
+niri is detected automatically and used as an optional backend for focused-output discovery and
+focused-window capture.
+
+On KDE Plasma Wayland, dmsshot-rs automatically uses KWin's
+`org.kde.KWin.ScreenShot2` D-Bus interface when wlr screencopy is unavailable. `full` captures the
+active screen, `all` captures the complete workspace, `output` captures a named screen, and
+`window` captures the active window. Region and OCR retain the dmsshot-rs overlay; scrolling uses
+KWin area captures and requires ScreenShot2 version 5 or newer so KWin can hide the overlay owned
+by dmsshot-rs.
+
+Some KWin versions restrict screenshot access to installed desktop applications. The PKGBUILD
+installs `dmsshot-rs.desktop` with the required `X-KDE-DBUS-Restricted-Interfaces` declaration.
+When running an unpackaged build on such a KWin version, install that file under
+`~/.local/share/applications/` first. KWin screenshots are returned as raw pixels and do not launch
+Spectacle or an xdg-desktop-portal dialog.
+
+Without a compositor backend, `full` falls back deterministically to the first output sorted by
+name, while `window` returns a clear unsupported-backend error. More compositor backends can be
+added under `src/backend/` without changing the overlay, OCR, or stitching layers.
 
 ## OCR
 
@@ -119,21 +147,29 @@ The ONNX model files are converted from PaddleOCR models and distributed by
 integration uses [paddle-ocr-rs](https://github.com/mg-chao/paddle-ocr-rs) under the Apache-2.0
 license.
 
-## GTK theme support
+## GTK and Qt theme support
 
-The region and scrolling overlays follow the current GTK theme for their background, text, and
-accent colors. Theme discovery uses `GTK_THEME` first and then
+The region and scrolling overlays use GTK colors by default. Pass `--gtk` to select GTK explicitly
+or `--qt` to use Qt colors; the two options are mutually exclusive and may be placed before or after
+the command.
+
+GTK theme discovery uses `GTK_THEME` first and then
 `org.gnome.desktop.interface gtk-theme` from `gsettings`. Both GTK 3 and GTK 4 CSS files are
 supported, including themes installed in the standard XDG data directories, `~/.themes`, and user
 overrides under `$XDG_CONFIG_HOME/gtk-3.0` or `$XDG_CONFIG_HOME/gtk-4.0`.
 
 The CSS reader understands common GTK color definitions and aliases such as `window_bg_color`,
-`window_fg_color`, `accent_color`, and `theme_selected_bg_color`. GTK is not a build-time or runtime
-library dependency. If the selected theme cannot be found or does not expose the required colors,
-the overlay uses its built-in dark color scheme.
+`window_fg_color`, `accent_color`, and `theme_selected_bg_color`.
 
-To override the detected theme for one invocation:
+Qt discovery checks qt6ct first, then qt5ct, and finally KDE's `kdeglobals` and referenced `.colors`
+files. It understands qtct `active_colors` palettes and KDE `Colors:Window`, `Colors:View`, and
+`Colors:Selection` groups. GTK and Qt are not build-time or runtime library dependencies. If the
+selected source cannot be found or does not expose the required colors, the overlay uses its
+built-in dark color scheme.
+
+Examples:
 
 ```sh
-GTK_THEME=Adwaita:dark dmsshot-rs
+GTK_THEME=Adwaita:dark dmsshot-rs --gtk
+dmsshot-rs --qt region
 ```

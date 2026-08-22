@@ -16,9 +16,9 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 };
 
 use crate::{
+    backend::OutputInfo,
     error::{Error, Result},
     imagebuf::{ImageBuffer, Region},
-    niri::OutputInfo,
 };
 
 struct Allocation {
@@ -44,7 +44,7 @@ struct CaptureState {
 pub struct WaylandCapture {
     queue: EventQueue<CaptureState>,
     state: CaptureState,
-    manager: ZwlrScreencopyManagerV1,
+    manager: Option<ZwlrScreencopyManagerV1>,
 }
 
 impl WaylandCapture {
@@ -59,7 +59,7 @@ impl WaylandCapture {
         let shm = Shm::bind(&globals, &qh).map_err(|_| Error::MissingProtocol("wl_shm"))?;
         let manager = globals
             .bind::<ZwlrScreencopyManagerV1, _, _>(&qh, 1..=3, ())
-            .map_err(|_| Error::MissingProtocol("wlr-screencopy-unstable-v1"))?;
+            .ok();
         let mut state = CaptureState {
             registry_state,
             output_state,
@@ -80,15 +80,22 @@ impl WaylandCapture {
         })
     }
 
-    pub fn output_names(&self) -> Vec<String> {
-        let mut names: Vec<_> = self
+    pub fn outputs(&self) -> Vec<OutputInfo> {
+        let mut outputs: Vec<_> = self
             .state
             .output_state
             .outputs()
-            .filter_map(|output| self.state.output_state.info(&output)?.name)
+            .filter_map(|output| {
+                let info = self.state.output_state.info(&output)?;
+                Some(output_info(info))
+            })
             .collect();
-        names.sort();
-        names
+        outputs.sort_by(|a, b| a.name.cmp(&b.name));
+        outputs
+    }
+
+    pub fn supports_screencopy(&self) -> bool {
+        self.manager.is_some()
     }
 
     pub fn capture_output(
@@ -96,11 +103,13 @@ impl WaylandCapture {
         info: &OutputInfo,
         overlay_cursor: bool,
     ) -> Result<ImageBuffer> {
-        let output = self.find_output(&info.name)?;
+        let output = self.find_output(info)?;
         let qh = self.queue.handle();
         self.reset_frame();
         let frame = self
             .manager
+            .as_ref()
+            .ok_or(Error::MissingProtocol("wlr-screencopy-unstable-v1"))?
             .capture_output(i32::from(overlay_cursor), &output, &qh, ());
         let mut image = self.finish_frame(&frame)?;
         if info.transform != 0 {
@@ -129,19 +138,23 @@ impl WaylandCapture {
         if width <= 0 || height <= 0 {
             return Err(Error::InvalidBuffer("empty capture region".into()));
         }
-        let output = self.find_output(&info.name)?;
+        let output = self.find_output(info)?;
         let qh = self.queue.handle();
         self.reset_frame();
-        let frame = self.manager.capture_output_region(
-            i32::from(overlay_cursor),
-            &output,
-            x,
-            y,
-            width,
-            height,
-            &qh,
-            (),
-        );
+        let frame = self
+            .manager
+            .as_ref()
+            .ok_or(Error::MissingProtocol("wlr-screencopy-unstable-v1"))?
+            .capture_output_region(
+                i32::from(overlay_cursor),
+                &output,
+                x,
+                y,
+                width,
+                height,
+                &qh,
+                (),
+            );
         let mut image = self.finish_frame(&frame)?;
         image.scale = valid_scale(info.scale);
         image.region = Region {
@@ -154,7 +167,7 @@ impl WaylandCapture {
         Ok(image)
     }
 
-    fn find_output(&self, name: &str) -> Result<wl_output::WlOutput> {
+    fn find_output(&self, requested: &OutputInfo) -> Result<wl_output::WlOutput> {
         self.state
             .output_state
             .outputs()
@@ -162,11 +175,9 @@ impl WaylandCapture {
                 self.state
                     .output_state
                     .info(output)
-                    .and_then(|info| info.name)
-                    .as_deref()
-                    == Some(name)
+                    .is_some_and(|info| info.id == requested.id)
             })
-            .ok_or_else(|| Error::OutputNotFound(name.to_owned()))
+            .ok_or_else(|| Error::OutputNotFound(requested.name.clone()))
     }
 
     fn reset_frame(&mut self) {
@@ -204,6 +215,93 @@ impl WaylandCapture {
             allocation.pool.mmap(),
             y_inverted,
         )
+    }
+}
+
+fn output_info(info: smithay_client_toolkit::output::OutputInfo) -> OutputInfo {
+    let transform = u32::from(info.transform) as i32;
+    let mode = info
+        .modes
+        .iter()
+        .find(|mode| mode.current)
+        .or_else(|| info.modes.iter().find(|mode| mode.preferred))
+        .or_else(|| info.modes.first());
+    let integer_scale = info.scale_factor.max(1) as f64;
+    let (mut physical_width, mut physical_height) = mode.map_or((0, 0), |mode| {
+        (
+            mode.dimensions.0.max(0) as u32,
+            mode.dimensions.1.max(0) as u32,
+        )
+    });
+    let (mut logical_width, mut logical_height) = info
+        .logical_size
+        .map_or((0, 0), |size| (size.0.max(0) as u32, size.1.max(0) as u32));
+
+    let swaps_axes = matches!(transform, 1 | 3 | 5 | 7);
+    let (oriented_width, oriented_height) = if swaps_axes {
+        (physical_height, physical_width)
+    } else {
+        (physical_width, physical_height)
+    };
+    if logical_width == 0 || logical_height == 0 {
+        logical_width = (oriented_width as f64 / integer_scale).round() as u32;
+        logical_height = (oriented_height as f64 / integer_scale).round() as u32;
+    }
+    if physical_width == 0 || physical_height == 0 {
+        let fallback_width = (logical_width as f64 * integer_scale).round() as u32;
+        let fallback_height = (logical_height as f64 * integer_scale).round() as u32;
+        (physical_width, physical_height) = if swaps_axes {
+            (fallback_height, fallback_width)
+        } else {
+            (fallback_width, fallback_height)
+        };
+    }
+
+    let scale = fractional_scale(
+        physical_width,
+        physical_height,
+        logical_width,
+        logical_height,
+        transform,
+        integer_scale,
+    );
+    let (x, y) = info.logical_position.unwrap_or(info.location);
+    OutputInfo {
+        id: info.id,
+        name: info.name.unwrap_or_else(|| format!("output-{}", info.id)),
+        physical_width,
+        physical_height,
+        x,
+        y,
+        logical_width: logical_width.max(1),
+        logical_height: logical_height.max(1),
+        scale,
+        transform,
+    }
+}
+
+fn fractional_scale(
+    physical_width: u32,
+    physical_height: u32,
+    logical_width: u32,
+    logical_height: u32,
+    transform: i32,
+    fallback: f64,
+) -> f64 {
+    if physical_width == 0 || physical_height == 0 || logical_width == 0 || logical_height == 0 {
+        return valid_scale(fallback);
+    }
+    let (width, height) = if matches!(transform, 1 | 3 | 5 | 7) {
+        (physical_height, physical_width)
+    } else {
+        (physical_width, physical_height)
+    };
+    let x = width as f64 / logical_width as f64;
+    let y = height as f64 / logical_height as f64;
+    if x.is_finite() && y.is_finite() && (x - y).abs() <= 0.02 {
+        valid_scale((x + y) / 2.0)
+    } else {
+        valid_scale(fallback)
     }
 }
 
@@ -344,3 +442,23 @@ delegate_registry!(CaptureState);
 smithay_client_toolkit::delegate_dispatch2!(CaptureState);
 delegate_noop!(CaptureState: ignore ZwlrScreencopyManagerV1);
 delegate_noop!(CaptureState: ignore wl_buffer::WlBuffer);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_fractional_scale_from_logical_size() {
+        assert!((fractional_scale(2560, 1440, 2048, 1152, 0, 1.0) - 1.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn derives_fractional_scale_for_rotated_output() {
+        assert!((fractional_scale(2560, 1440, 1152, 2048, 1, 1.0) - 1.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn inconsistent_dimensions_use_protocol_scale() {
+        assert_eq!(fractional_scale(1920, 1080, 1000, 1000, 0, 2.0), 2.0);
+    }
+}

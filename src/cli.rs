@@ -68,7 +68,7 @@ pub enum Command {
         /// Output name. This positional argument overrides --output.
         name: Option<String>,
     },
-    /// Capture the focused niri window.
+    /// Capture the focused window using an available compositor backend.
     Window,
     /// Select and continuously stitch a scrolling region.
     Scroll {
@@ -103,11 +103,7 @@ pub enum Command {
 }
 
 #[derive(Debug, Clone, Parser)]
-#[command(
-    name = "dmsshot",
-    version,
-    about = "Native screenshot utility for niri"
-)]
+#[command(name = "dmsshot", version, about = "Native Wayland screenshot utility")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -159,6 +155,14 @@ pub struct Cli {
     /// Do not show a desktop notification after a successful capture.
     #[arg(long, global = true)]
     pub no_notify: bool,
+
+    /// Use colors from the active GTK theme for interactive overlays (default).
+    #[arg(long, conflicts_with = "qt", global = true)]
+    pub gtk: bool,
+
+    /// Use colors from qt6ct, qt5ct, or KDE for interactive overlays.
+    #[arg(long, conflicts_with = "gtk", global = true)]
+    pub qt: bool,
 }
 
 impl Cli {
@@ -191,6 +195,17 @@ mod tests {
     #[test]
     fn stdout_conflicts_with_json() {
         assert!(Cli::try_parse_from(["dmsshot", "--stdout", "--json"]).is_err());
+    }
+
+    #[test]
+    fn gtk_and_qt_theme_flags_are_mutually_exclusive() {
+        let gtk = Cli::try_parse_from(["dmsshot", "--gtk"]).unwrap();
+        assert!(gtk.gtk);
+        assert!(!gtk.qt);
+        let qt = Cli::try_parse_from(["dmsshot", "--qt"]).unwrap();
+        assert!(qt.qt);
+        assert!(!qt.gtk);
+        assert!(Cli::try_parse_from(["dmsshot", "--gtk", "--qt"]).is_err());
     }
 
     #[test]

@@ -8,19 +8,19 @@ use std::{
 use serde::Serialize;
 
 use crate::{
+    backend::{CaptureSource, DesktopBackend, OutputInfo, WindowCapture},
     cli::{Cli, Command, OcrEngine},
     error::{Error, Result},
     imagebuf::ImageBuffer,
-    integration,
-    niri::{self, OutputInfo},
-    ocr,
-    overlay::{self, Background, SelectorOptions},
+    integration, ocr,
+    overlay::{self, Background, SelectorOptions, ThemeSource},
     state,
     wayland::WaylandCapture,
 };
 
 pub struct Application {
     cli: Cli,
+    backend: DesktopBackend,
 }
 
 #[derive(Serialize)]
@@ -51,9 +51,11 @@ struct OcrMetadata<'a> {
 }
 
 impl Application {
-    pub fn new(cli: Cli) -> Result<Self> {
-        niri::ensure_niri()?;
-        Ok(Self { cli })
+    pub fn new(cli: Cli) -> Self {
+        Self {
+            cli,
+            backend: DesktopBackend::detect(),
+        }
     }
 
     pub fn run(self) -> Result<()> {
@@ -71,12 +73,14 @@ impl Application {
             return self.run_ocr(*engine, model_dir.as_deref(), language, *psm);
         }
 
-        // niri's ScreenshotWindow action owns the clipboard as part of the action itself. Copying
-        // the encoded file again here would create a second clipboard item for the same capture.
-        let clipboard_already_set = matches!(&command, Command::Window);
+        let mut clipboard_already_set = false;
 
         let image = match command {
-            Command::Window => Some(self.capture_window()?),
+            Command::Window => {
+                let captured = self.capture_window()?;
+                clipboard_already_set = captured.clipboard_already_set;
+                Some(captured.image)
+            }
             Command::Full => Some(self.capture_full()?),
             Command::All => Some(self.capture_all()?),
             Command::Output { name } => {
@@ -160,7 +164,8 @@ impl Application {
     }
 
     fn list_outputs(&self) -> Result<()> {
-        for output in niri::outputs()? {
+        let capture = WaylandCapture::connect()?;
+        for output in capture.outputs() {
             println!(
                 "{}: {}x{}+{}+{} scale={} transform={}",
                 output.name,
@@ -175,45 +180,53 @@ impl Application {
         Ok(())
     }
 
-    fn capture_window(&self) -> Result<ImageBuffer> {
-        let mut image = niri::capture_focused_window(self.cli.cursor.enabled())?;
-        if let Some(name) = niri::focused_output_name()?
-            && let Some(output) = niri::outputs()?
+    fn capture_window(&self) -> Result<WindowCapture> {
+        let mut captured = self
+            .backend
+            .capture_focused_window(self.cli.cursor.enabled())?;
+        if let Some(name) = self.backend.focused_output_name()
+            && let Ok(capture) = WaylandCapture::connect()
+            && let Some(output) = capture
+                .outputs()
                 .into_iter()
                 .find(|output| output.name == name)
         {
-            image.scale = output.scale;
-            image.region.output = output.name;
+            captured.image.scale = output.scale;
+            captured.image.region.output = output.name;
         }
-        Ok(image)
+        Ok(captured)
     }
 
     fn capture_full(&self) -> Result<ImageBuffer> {
-        let outputs = niri::outputs()?;
-        let name = niri::focused_output_name()?
-            .or_else(|| outputs.first().map(|output| output.name.clone()))
-            .ok_or(Error::NoOutputs)?;
-        let output = outputs
-            .iter()
-            .find(|output| output.name == name)
-            .ok_or_else(|| Error::OutputNotFound(name.clone()))?;
-        WaylandCapture::connect()?.capture_output(output, self.cli.cursor.enabled())
+        let mut capture = self.backend.capture_session()?;
+        if let Some(image) = capture.capture_active_output(self.cli.cursor.enabled())? {
+            return Ok(image);
+        }
+        let outputs = capture.outputs();
+        let focused = self.backend.focused_output_name();
+        let output = select_full_output(&outputs, focused.as_deref()).ok_or(Error::NoOutputs)?;
+        capture.capture_output(output, self.cli.cursor.enabled())
     }
 
     fn capture_named(&self, name: &str) -> Result<ImageBuffer> {
-        let output = niri::outputs()?
+        let mut capture = self.backend.capture_session()?;
+        let output = capture
+            .outputs()
             .into_iter()
             .find(|output| output.name == name)
             .ok_or_else(|| Error::OutputNotFound(name.to_owned()))?;
-        WaylandCapture::connect()?.capture_output(&output, self.cli.cursor.enabled())
+        capture.capture_output(&output, self.cli.cursor.enabled())
     }
 
     fn capture_all(&self) -> Result<ImageBuffer> {
-        let outputs = niri::outputs()?;
+        let mut capture = self.backend.capture_session()?;
+        if let Some(image) = capture.capture_workspace(self.cli.cursor.enabled())? {
+            return Ok(image);
+        }
+        let outputs = capture.outputs();
         if outputs.is_empty() {
             return Err(Error::NoOutputs);
         }
-        let mut capture = WaylandCapture::connect()?;
         let mut captured = Vec::with_capacity(outputs.len());
         for output in outputs {
             captured.push((
@@ -228,17 +241,13 @@ impl Application {
         if self.cli.reset {
             state::reset_last_region()?;
         }
-        let outputs = niri::outputs()?;
+        let mut capture = self.backend.capture_session()?;
+        let outputs = capture.outputs();
         if outputs.is_empty() {
             return Err(Error::NoOutputs);
         }
-        let mut capture = WaylandCapture::connect()?;
-        let wayland_names = capture.output_names();
         let mut backgrounds = Vec::with_capacity(outputs.len());
         for info in outputs {
-            if !wayland_names.contains(&info.name) {
-                return Err(Error::OutputNotFound(info.name));
-            }
             let with_cursor = capture.capture_output(&info, true)?;
             let without_cursor = capture.capture_output(&info, false)?;
             backgrounds.push(Background {
@@ -255,6 +264,11 @@ impl Application {
                 interval: Duration::from_millis(interval_ms),
                 initial: state::load_last_region(),
                 show_cursor: self.cli.cursor.enabled(),
+                theme_source: if self.cli.qt {
+                    ThemeSource::Qt
+                } else {
+                    ThemeSource::Gtk
+                },
             },
             &mut capture,
         )?;
@@ -400,6 +414,15 @@ fn transform_name(transform: i32) -> &'static str {
     }
 }
 
+fn select_full_output<'a>(
+    outputs: &'a [OutputInfo],
+    focused_name: Option<&str>,
+) -> Option<&'a OutputInfo> {
+    focused_name
+        .and_then(|name| outputs.iter().find(|output| output.name == name))
+        .or_else(|| outputs.first())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +430,7 @@ mod tests {
 
     fn output(name: &str, x: i32, scale: f64) -> OutputInfo {
         OutputInfo {
+            id: 0,
             name: name.into(),
             physical_width: 100,
             physical_height: 100,
@@ -431,5 +455,20 @@ mod tests {
         .unwrap();
         assert_eq!((result.width, result.height), (400, 200));
         assert_eq!(result.scale, 2.0);
+    }
+
+    #[test]
+    fn full_output_prefers_backend_focus_and_falls_back_to_first() {
+        let outputs = vec![output("DP-1", 0, 1.0), output("DP-2", 100, 1.0)];
+        assert_eq!(
+            select_full_output(&outputs, Some("DP-2")).unwrap().name,
+            "DP-2"
+        );
+        assert_eq!(
+            select_full_output(&outputs, Some("missing")).unwrap().name,
+            "DP-1"
+        );
+        assert_eq!(select_full_output(&outputs, None).unwrap().name, "DP-1");
+        assert!(select_full_output(&[], None).is_none());
     }
 }

@@ -1,9 +1,9 @@
 mod app;
+mod backend;
 mod cli;
 mod error;
 mod imagebuf;
 mod integration;
-mod niri;
 mod ocr;
 mod overlay;
 mod state;
@@ -26,7 +26,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let json = cli.json;
-    match Application::new(cli).and_then(Application::run) {
+    match Application::new(cli).run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             if json {
