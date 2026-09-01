@@ -148,6 +148,7 @@ struct SelectorState {
     _viewporter: WpViewporter,
     active_surface: Option<usize>,
     pointer_position: (f64, f64),
+    pointer_color: [u8; 4],
     selection: Selection,
     shift: bool,
     show_cursor: bool,
@@ -161,6 +162,7 @@ struct SelectorState {
     result: Option<ImageBuffer>,
     error: Option<Error>,
     theme: Theme,
+    clipboard: Option<arboard::Clipboard>,
 }
 
 pub fn select_region(
@@ -184,6 +186,7 @@ pub fn select_region(
     let viewporter = globals
         .bind::<WpViewporter, _, _>(&qh, 1..=1, ())
         .map_err(|_| Error::MissingProtocol("wp_viewporter"))?;
+    let clipboard = arboard::Clipboard::new().ok();
     let mut state = SelectorState {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
@@ -202,6 +205,7 @@ pub fn select_region(
         _viewporter: viewporter.clone(),
         active_surface: None,
         pointer_position: (0.0, 0.0),
+        pointer_color: [0, 0, 0, 255],
         selection: Selection::default(),
         shift: false,
         show_cursor: options.show_cursor,
@@ -215,6 +219,7 @@ pub fn select_region(
         result: None,
         error: None,
         theme: Theme::load(options.theme_source),
+        clipboard: clipboard,
     };
     event_queue
         .roundtrip(&mut state)
@@ -403,6 +408,7 @@ impl SelectorState {
 
     fn render(&mut self, index: usize, width: u32, height: u32) -> Vec<u8> {
         if self.phase == Phase::Select {
+            // 选择阶段
             let rect = (self.selection.present && self.selection.surface == Some(index))
                 .then(|| selection_rect(&self.selection, width, height));
             let show_cursor = self.show_cursor;
@@ -456,6 +462,8 @@ impl SelectorState {
                     self.theme,
                 );
             }
+            // 绘制矩形
+            self.draw_follow_mouse_rect(&mut rgba, width, height, index);
             rgba
         } else {
             let mut rgba = std::mem::take(&mut self.surfaces[index].render_buffer);
@@ -757,6 +765,115 @@ impl SelectorState {
         }
         self.running = false;
     }
+
+    // 绘制更随鼠标的矩形
+    fn draw_follow_mouse_rect(&mut self, data: &mut [u8], width: u32, height: u32, index: usize) {
+        let (mx, my) = self.pointer_position;
+        let size: u32 = 64;
+        let offset: u32 = 20;
+
+        // 计算位置
+        let x = if mx as u32 + size > width {
+            mx as u32 - size - offset
+        } else {
+            mx as u32 + offset
+        };
+
+        let y = if my as u32 + size > height {
+            my as u32 - size - offset
+        } else {
+            my as u32 + offset
+        };
+
+        let rect = (x.max(0) as u32, y.max(0) as u32, size, size);
+
+        if let Some(captured) = self.capture_around_mouse(index, size / 2) {
+            let src_w: usize = captured.width as usize;
+            let src_h: usize = captured.height as usize;
+            let scale_x: f32 = size as f32 / src_w as f32;
+            let scale_y: f32 = size as f32 / src_h as f32;
+
+            // 遍历矩形
+            for dst_y in 0..size {
+                for dst_x in 0..size {
+                    // 在屏幕上的坐标
+                    let px = rect.0 + dst_x;
+                    let py = rect.1 + dst_y;
+                    if px >= width || py >= height {
+                        continue;
+                    }
+
+                    let src_x: usize = (dst_x as f32 / scale_x).min(src_w as f32 - 1.0) as usize;
+                    let src_y: usize = (dst_y as f32 / scale_y).min(src_h as f32 - 1.0) as usize;
+                    let src_idx: usize = (src_y * src_w + src_x) * 4;
+                    let dst_idx: usize = ((py * width + px) * 4) as usize;
+
+                    data[dst_idx..dst_idx + 4]
+                        .copy_from_slice(&captured.pixels[src_idx..src_idx + 4]);
+                }
+            }
+        } else {
+            fill_rect(data, width, height, rect, self.theme.accent);
+        }
+        let px = mx as usize;
+        let py: usize = my as usize;
+
+        let mouse_pixel: [u8; 4] = {
+            let idx = (py * width as usize + px) * 4;
+            [data[idx], data[idx + 1], data[idx + 2], data[idx + 3]]
+        };
+
+        self.pointer_color = mouse_pixel;
+        let color_block_size: u32 = 20;
+        let gap: u32 = 4;
+        let color_block_y: u32 = rect.1 + rect.3 + gap;
+        // let color_pos:(u32,u32) = (rect.0 + color_block_size + gap,color_block_y);
+
+        // 绘制色块
+        fill_rect(
+            data,
+            width,
+            height,
+            (rect.0, color_block_y, color_block_size, color_block_size),
+            mouse_pixel,
+        );
+
+        // draw_text(data, width, height, color_pos.0, color_pos.1, &color_str, self.theme.text, 1.5);
+
+        draw_pos_line(data, width, height, rect, 1, [0, 255, 0, 128]);
+    }
+
+    fn capture_around_mouse(&self, index: usize, size: u32) -> Option<ImageBuffer> {
+        let surface = &self.surfaces[index];
+        let source = if self.show_cursor {
+            &surface.with_cursor
+        } else {
+            &surface.without_cursor
+        };
+        let (mx, my) = self.pointer_position;
+        let half = size as i32 / 2;
+        let x = (mx as i32 - half).max(0) as u32;
+        let y = (my as i32 - half).max(0) as u32;
+        let w = size.min(source.width - x);
+        let h = size.min(source.height - y);
+        source.crop(x as i32, y as i32, w as i32, h as i32).ok()
+    }
+
+    fn copy_color_at_pointer(&self) {
+        let mouse_pixel = self.pointer_color;
+        let color_string = format!(
+            "#{:02X}{:02X}{:02X}{:02X}",
+            mouse_pixel[0], mouse_pixel[1], mouse_pixel[2], mouse_pixel[3]
+        );
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => {
+                if let Err(err) = clipboard.set_text(color_string) {
+                    eprintln!("Failed to copy color: {err}");
+                }
+            }
+            Err(err) => eprintln!("Clipboard unavailable: {err}"),
+        }
+    }
 }
 
 impl CompositorHandler for SelectorState {
@@ -931,8 +1048,8 @@ impl PointerHandler for SelectorState {
                             current.1 = self.selection.anchor.1 + size.copysign(dy);
                         }
                         self.selection.current = current;
-                        self.redraw(index, qh);
                     }
+                    self.redraw(index, qh);
                 }
                 PointerEventKind::Press { button, .. } if button == LEFT_BUTTON => {
                     if self.phase == Phase::Scroll {
@@ -1021,6 +1138,9 @@ impl KeyboardHandler for SelectorState {
             Keysym::p | Keysym::P if self.phase == Phase::Select => {
                 self.show_cursor = !self.show_cursor;
                 self.redraw_all(qh);
+            }
+            Keysym::c | Keysym::C => {
+                self.copy_color_at_pointer()
             }
             _ => {}
         }
@@ -1560,6 +1680,31 @@ fn clear_rect(data: &mut [u8], width: u32, height: u32, rect: (u32, u32, u32, u3
             data[i..i + 4].fill(0);
         }
     }
+}
+
+// 定位十字线
+fn draw_pos_line(
+    data: &mut [u8],
+    width: u32,
+    height: u32,
+    rect: (u32, u32, u32, u32), // 要画线的矩形
+    thickness: u32,             // 线的厚度
+    color: [u8; 4],
+) {
+    if rect.2 == 0 || rect.3 == 0 || thickness == 0 {
+        return;
+    }
+
+    // 横线
+    let hx: u32 = rect.0;
+    let hy: u32 = rect.1 + (rect.3 - thickness) / 2;
+
+    // 垂直线
+    let vx: u32 = rect.0 + (rect.2 - thickness) / 2;
+    let vy: u32 = rect.1;
+
+    fill_rect(data, width, height, (hx, hy, rect.2, thickness), color);
+    fill_rect(data, width, height, (vx, vy, thickness, rect.3), color);
 }
 
 fn draw_border_lines(
