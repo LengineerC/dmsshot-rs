@@ -48,7 +48,7 @@ use crate::{
     backend::{CaptureSource, OutputInfo},
     error::{Error, Result},
     imagebuf::{ImageBuffer, Region},
-    integration, 
+    integration,
     stitch::{Stitcher, duplicate_frame},
 };
 
@@ -769,7 +769,7 @@ impl SelectorState {
         let (mx, my) = self.pointer_position;
         let size: u32 = 64;
         let offset: u32 = 20;
-
+        let radius: u32 = 10;
         // 计算位置
         let x = if mx as u32 + size > width {
             mx as u32 - size - offset
@@ -793,7 +793,29 @@ impl SelectorState {
 
             // 遍历矩形
             for dst_y in 0..size {
-                for dst_x in 0..size {
+                // 当前行到上下边的距离
+                let dy = if dst_y < radius {
+                    radius - dst_y
+                } else if dst_y >= size - radius {
+                    dst_y - (size - radius - 1)
+                } else {
+                    0
+                };
+
+                // 当前行左侧该缩进多少
+                let mut inset = 0;
+                if dy > 0 {
+                    inset = radius;
+                    for candidate in 0..=radius {
+                        let dx = radius - candidate;
+                        if dx * dx + dy * dy <= radius * radius {
+                            inset = candidate;
+                            break;
+                        }
+                    }
+                }
+
+                for dst_x in inset..(size - inset) {
                     // 在屏幕上的坐标
                     let px = rect.0 + dst_x;
                     let py = rect.1 + dst_y;
@@ -811,7 +833,7 @@ impl SelectorState {
                 }
             }
         } else {
-            fill_rect(data, width, height, rect, self.theme.accent);
+            fill_rounded_rect(data, width, height, rect, 5, self.theme.accent);
         }
         let px = mx as usize;
         let py: usize = my as usize;
