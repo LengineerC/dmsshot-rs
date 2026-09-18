@@ -48,6 +48,7 @@ use crate::{
     backend::{CaptureSource, OutputInfo},
     error::{Error, Result},
     imagebuf::{ImageBuffer, Region},
+    integration, 
     stitch::{Stitcher, duplicate_frame},
 };
 
@@ -162,7 +163,6 @@ struct SelectorState {
     result: Option<ImageBuffer>,
     error: Option<Error>,
     theme: Theme,
-    clipboard: Option<arboard::Clipboard>,
 }
 
 pub fn select_region(
@@ -186,7 +186,6 @@ pub fn select_region(
     let viewporter = globals
         .bind::<WpViewporter, _, _>(&qh, 1..=1, ())
         .map_err(|_| Error::MissingProtocol("wp_viewporter"))?;
-    let clipboard = arboard::Clipboard::new().ok();
     let mut state = SelectorState {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
@@ -219,7 +218,6 @@ pub fn select_region(
         result: None,
         error: None,
         theme: Theme::load(options.theme_source),
-        clipboard: clipboard,
     };
     event_queue
         .roundtrip(&mut state)
@@ -865,13 +863,8 @@ impl SelectorState {
             "#{:02X}{:02X}{:02X}{:02X}",
             mouse_pixel[0], mouse_pixel[1], mouse_pixel[2], mouse_pixel[3]
         );
-        match arboard::Clipboard::new() {
-            Ok(mut clipboard) => {
-                if let Err(err) = clipboard.set_text(color_string) {
-                    eprintln!("Failed to copy color: {err}");
-                }
-            }
-            Err(err) => eprintln!("Clipboard unavailable: {err}"),
+        if let Err(err) = integration::copy_text(&color_string) {
+            eprintln!("Failed to copy color: {err}");
         }
     }
 }
@@ -1139,9 +1132,7 @@ impl KeyboardHandler for SelectorState {
                 self.show_cursor = !self.show_cursor;
                 self.redraw_all(qh);
             }
-            Keysym::c | Keysym::C => {
-                self.copy_color_at_pointer()
-            }
+            Keysym::c | Keysym::C => self.copy_color_at_pointer(),
             _ => {}
         }
     }
