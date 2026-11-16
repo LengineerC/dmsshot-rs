@@ -845,21 +845,27 @@ impl SelectorState {
         } else {
             fill_rounded_rect(data, width, height, rect, 5, self.theme.accent);
         }
-        let color_block_size: u32 = 20;
-        let gap: u32 = 4;
-        let color_block_y: u32 = rect.1 + rect.3 + gap;
-        // let color_pos:(u32,u32) = (rect.0 + color_block_size + gap,color_block_y);
+        let color_text = hex_color(mouse_pixel);
+        let (color_block, label) = color_badge_layout(rect, width, height, &color_text);
 
-        // 绘制色块
-        fill_rect(
+        fill_rounded_rect(data, width, height, color_block, 5, mouse_pixel);
+        fill_rounded_rect(
             data,
             width,
             height,
-            (rect.0, color_block_y, color_block_size, color_block_size),
-            mouse_pixel,
+            label.background,
+            4,
+            self.theme.background,
         );
-
-        // draw_text(data, width, height, color_pos.0, color_pos.1, &color_str, self.theme.text, 1.5);
+        draw_text(
+            data,
+            width,
+            height,
+            label.text.0,
+            label.text.1,
+            &color_text,
+            self.theme.text,
+        );
 
         draw_pos_line(data, width, height, rect, 1, [0, 255, 0, 128]);
     }
@@ -891,10 +897,7 @@ impl SelectorState {
 
     fn copy_color_at_pointer(&self) {
         let mouse_pixel = self.pointer_color;
-        let color_string = format!(
-            "#{:02X}{:02X}{:02X}{:02X}",
-            mouse_pixel[0], mouse_pixel[1], mouse_pixel[2], mouse_pixel[3]
-        );
+        let color_string = hex_color(mouse_pixel);
         if let Err(err) = integration::copy_text(&color_string) {
             eprintln!("Failed to copy color: {err}");
         }
@@ -1011,6 +1014,69 @@ fn pixel_at(data: &[u8], width: u32, height: u32, x: u32, y: u32) -> Option<[u8;
         .checked_mul(4)?;
     let pixel = data.get(index..index.checked_add(4)?)?;
     Some([pixel[0], pixel[1], pixel[2], pixel[3]])
+}
+
+struct ColorLabelLayout {
+    background: PixelRect,
+    text: (u32, u32),
+}
+
+fn color_badge_layout(
+    magnifier: PixelRect,
+    width: u32,
+    height: u32,
+    text: &str,
+) -> (PixelRect, ColorLabelLayout) {
+    const BLOCK_SIZE: u32 = 20;
+    const GAP: u32 = 4;
+    const PADDING: u32 = 4;
+    const TEXT_HEIGHT: u32 = 7;
+
+    let (magnifier_x, magnifier_y, _, magnifier_height) = magnifier;
+    let block_x = magnifier_x.min(width.saturating_sub(BLOCK_SIZE));
+    let below = magnifier_y
+        .saturating_add(magnifier_height)
+        .saturating_add(GAP);
+    let block_y = if below.saturating_add(BLOCK_SIZE) <= height {
+        below
+    } else {
+        magnifier_y.saturating_sub(GAP.saturating_add(BLOCK_SIZE))
+    };
+    let block_y = block_y.min(height.saturating_sub(BLOCK_SIZE));
+    let block = (block_x, block_y, BLOCK_SIZE, BLOCK_SIZE);
+
+    let label_width = text_width(text).saturating_add(PADDING * 2);
+    let label_height = TEXT_HEIGHT.saturating_add(PADDING * 2);
+    let right = block_x.saturating_add(BLOCK_SIZE).saturating_add(GAP);
+    let label_x = if right.saturating_add(label_width) <= width {
+        right
+    } else {
+        block_x.saturating_sub(GAP.saturating_add(label_width))
+    };
+    let label_x = label_x.min(width.saturating_sub(label_width));
+    let label_y = block_y
+        .saturating_add(BLOCK_SIZE.saturating_sub(label_height) / 2)
+        .min(height.saturating_sub(label_height));
+
+    (
+        block,
+        ColorLabelLayout {
+            background: (label_x, label_y, label_width, label_height),
+            text: (
+                label_x.saturating_add(PADDING),
+                label_y.saturating_add(PADDING),
+            ),
+        },
+    )
+}
+
+fn hex_color(color: [u8; 4]) -> String {
+    let [red, green, blue, alpha] = color;
+    if alpha == 255 {
+        format!("#{red:02X}{green:02X}{blue:02X}")
+    } else {
+        format!("#{red:02X}{green:02X}{blue:02X}{alpha:02X}")
+    }
 }
 
 impl CompositorHandler for SelectorState {
@@ -2330,6 +2396,7 @@ fn bold_text_width(text: &str) -> u32 {
 }
 fn glyph(ch: char) -> [u8; 7] {
     match ch {
+        '#' => [10, 31, 10, 10, 31, 10, 0],
         '0' => [14, 17, 19, 21, 25, 17, 14],
         '1' => [4, 12, 4, 4, 4, 4, 14],
         '2' => [14, 17, 1, 2, 4, 8, 31],
@@ -2341,9 +2408,11 @@ fn glyph(ch: char) -> [u8; 7] {
         '8' => [14, 17, 17, 14, 17, 17, 14],
         '9' => [14, 17, 17, 15, 1, 1, 14],
         'a' => [0, 14, 1, 15, 17, 19, 13],
+        'b' => [16, 16, 30, 17, 17, 17, 30],
         'c' => [0, 14, 17, 16, 16, 17, 14],
         'd' => [1, 1, 15, 17, 17, 19, 13],
         'e' => [0, 14, 17, 31, 16, 17, 14],
+        'f' => [6, 8, 8, 28, 8, 8, 8],
         'h' => [16, 16, 30, 17, 17, 17, 17],
         'i' => [4, 0, 12, 4, 4, 4, 14],
         'l' => [12, 4, 4, 4, 4, 4, 14],
@@ -2437,6 +2506,41 @@ mod tests {
         assert_eq!(pixel_at(&data, 2, 2, 0, 0), Some([1, 2, 3, 4]));
         assert_eq!(pixel_at(&data, 2, 2, 2, 0), None);
         assert_eq!(pixel_at(&data, 2, 2, 0, 2), None);
+    }
+
+    #[test]
+    fn hex_color_uses_rgb_for_opaque_pixels() {
+        assert_eq!(hex_color([0x12, 0x34, 0x56, 255]), "#123456");
+        assert_eq!(hex_color([0x12, 0x34, 0x56, 0x78]), "#12345678");
+    }
+
+    #[test]
+    fn color_badge_stays_inside_the_output() {
+        for magnifier in [
+            (0, 0, 64, 64),
+            (1856, 0, 64, 64),
+            (0, 1016, 64, 64),
+            (1856, 1016, 64, 64),
+        ] {
+            let (block, label) = color_badge_layout(magnifier, 1920, 1080, "#12345678");
+            assert!(block.0 + block.2 <= 1920);
+            assert!(block.1 + block.3 <= 1080);
+            assert!(label.background.0 + label.background.2 <= 1920);
+            assert!(label.background.1 + label.background.3 <= 1080);
+        }
+        let (block, label) = color_badge_layout((0, 0, 64, 64), 100, 50, "#12345678");
+        assert!(block.0 + block.2 <= 100);
+        assert!(block.1 + block.3 <= 50);
+        assert!(label.background.0 + label.background.2 <= 100);
+        assert!(label.background.1 + label.background.3 <= 50);
+    }
+
+    #[test]
+    fn hex_label_glyphs_are_visible() {
+        for ch in "#0123456789ABCDEF".chars() {
+            let glyph = glyph(ch.to_ascii_lowercase());
+            assert!(glyph.iter().any(|row| *row != 0), "missing glyph for {ch}");
+        }
     }
 
     #[test]
