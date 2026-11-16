@@ -68,6 +68,7 @@ pub struct SelectorOptions {
     pub interval: Duration,
     pub initial: Region,
     pub show_cursor: bool,
+    pub magnifier: bool,
     pub theme_source: ThemeSource,
 }
 
@@ -153,6 +154,7 @@ struct SelectorState {
     selection: Selection,
     shift: bool,
     show_cursor: bool,
+    magnifier: bool,
     no_confirm: bool,
     phase: Phase,
     scroll: Option<ScrollState>,
@@ -208,6 +210,7 @@ pub fn select_region(
         selection: Selection::default(),
         shift: false,
         show_cursor: options.show_cursor,
+        magnifier: options.magnifier,
         no_confirm: options.no_confirm,
         phase: Phase::Select,
         scroll: None,
@@ -460,8 +463,10 @@ impl SelectorState {
                     self.theme,
                 );
             }
-            // 绘制矩形
-            self.draw_follow_mouse_rect(&mut rgba, width, height, index);
+            // 放大镜只属于指针当前所在的输出，避免用一块屏幕的坐标渲染另一块屏幕。
+            if self.magnifier && self.active_surface == Some(index) {
+                self.draw_follow_mouse_rect(&mut rgba, width, height, index);
+            }
             rgba
         } else {
             let mut rgba = std::mem::take(&mut self.surfaces[index].render_buffer);
@@ -764,26 +769,31 @@ impl SelectorState {
         self.running = false;
     }
 
-    // 绘制更随鼠标的矩形
+    // 绘制跟随鼠标的矩形
     fn draw_follow_mouse_rect(&mut self, data: &mut [u8], width: u32, height: u32, index: usize) {
-        let (mx, my) = self.pointer_position;
+        if !self.magnifier || self.active_surface != Some(index) {
+            return;
+        }
         let size: u32 = 64;
         let offset: u32 = 20;
         let radius: u32 = 10;
-        // 计算位置
-        let x = if mx as u32 + size > width {
-            mx as u32 - size - offset
-        } else {
-            mx as u32 + offset
+        let Some(rect) = magnifier_rect(self.pointer_position, width, height, size, offset) else {
+            return;
         };
 
-        let y = if my as u32 + size > height {
-            my as u32 - size - offset
-        } else {
-            my as u32 + offset
+        // 先读取指针对应的像素，再绘制放大镜，避免边缘夹取后读到放大镜自身。
+        let pointer_x = self
+            .pointer_position
+            .0
+            .clamp(0.0, width.saturating_sub(1) as f64) as u32;
+        let pointer_y = self
+            .pointer_position
+            .1
+            .clamp(0.0, height.saturating_sub(1) as f64) as u32;
+        let Some(mouse_pixel) = pixel_at(data, width, height, pointer_x, pointer_y) else {
+            return;
         };
-
-        let rect = (x.max(0) as u32, y.max(0) as u32, size, size);
+        self.pointer_color = mouse_pixel;
 
         if let Some(captured) = self.capture_around_mouse(index, size / 2) {
             let src_w: usize = captured.width as usize;
@@ -835,15 +845,6 @@ impl SelectorState {
         } else {
             fill_rounded_rect(data, width, height, rect, 5, self.theme.accent);
         }
-        let px = mx as usize;
-        let py: usize = my as usize;
-
-        let mouse_pixel: [u8; 4] = {
-            let idx = (py * width as usize + px) * 4;
-            [data[idx], data[idx + 1], data[idx + 2], data[idx + 3]]
-        };
-
-        self.pointer_color = mouse_pixel;
         let color_block_size: u32 = 20;
         let gap: u32 = 4;
         let color_block_y: u32 = rect.1 + rect.3 + gap;
@@ -864,19 +865,28 @@ impl SelectorState {
     }
 
     fn capture_around_mouse(&self, index: usize, size: u32) -> Option<ImageBuffer> {
-        let surface = &self.surfaces[index];
+        let surface = self.surfaces.get(index)?;
         let source = if self.show_cursor {
             &surface.with_cursor
         } else {
             &surface.without_cursor
         };
-        let (mx, my) = self.pointer_position;
-        let half = size as i32 / 2;
-        let x = (mx as i32 - half).max(0) as u32;
-        let y = (my as i32 - half).max(0) as u32;
-        let w = size.min(source.width - x);
-        let h = size.min(source.height - y);
-        source.crop(x as i32, y as i32, w as i32, h as i32).ok()
+        let rect = capture_rect(
+            self.pointer_position,
+            size,
+            surface.logical_width,
+            surface.logical_height,
+            source.width,
+            source.height,
+        )?;
+        source
+            .crop(
+                rect.x as i32,
+                rect.y as i32,
+                rect.width as i32,
+                rect.height as i32,
+            )
+            .ok()
     }
 
     fn copy_color_at_pointer(&self) {
@@ -889,6 +899,118 @@ impl SelectorState {
             eprintln!("Failed to copy color: {err}");
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+fn magnifier_rect(
+    pointer: (f64, f64),
+    width: u32,
+    height: u32,
+    size: u32,
+    offset: u32,
+) -> Option<PixelRect> {
+    if size == 0 || width < size || height < size {
+        return None;
+    }
+    let pointer_x = if pointer.0.is_finite() {
+        pointer.0.clamp(0.0, width.saturating_sub(1) as f64)
+    } else {
+        0.0
+    };
+    let pointer_y = if pointer.1.is_finite() {
+        pointer.1.clamp(0.0, height.saturating_sub(1) as f64)
+    } else {
+        0.0
+    };
+
+    let preferred_x = if pointer_x + offset as f64 + size as f64 <= width as f64 {
+        pointer_x + offset as f64
+    } else {
+        pointer_x - offset as f64 - size as f64
+    };
+    let preferred_y = if pointer_y + offset as f64 + size as f64 <= height as f64 {
+        pointer_y + offset as f64
+    } else {
+        pointer_y - offset as f64 - size as f64
+    };
+
+    let x = preferred_x
+        .round()
+        .clamp(0.0, width.saturating_sub(size) as f64) as u32;
+    let y = preferred_y
+        .round()
+        .clamp(0.0, height.saturating_sub(size) as f64) as u32;
+    Some((x, y, size, size))
+}
+
+fn capture_rect(
+    pointer: (f64, f64),
+    logical_size: u32,
+    logical_width: u32,
+    logical_height: u32,
+    source_width: u32,
+    source_height: u32,
+) -> Option<CaptureRect> {
+    if logical_size == 0
+        || logical_width == 0
+        || logical_height == 0
+        || source_width == 0
+        || source_height == 0
+        || !pointer.0.is_finite()
+        || !pointer.1.is_finite()
+    {
+        return None;
+    }
+
+    let scale_x = source_width as f64 / logical_width as f64;
+    let scale_y = source_height as f64 / logical_height as f64;
+    let pointer_x = pointer.0.clamp(0.0, logical_width.saturating_sub(1) as f64);
+    let pointer_y = pointer
+        .1
+        .clamp(0.0, logical_height.saturating_sub(1) as f64);
+
+    let width = (logical_size as f64 * scale_x)
+        .round()
+        .max(1.0)
+        .min(source_width as f64) as u32;
+    let height = (logical_size as f64 * scale_y)
+        .round()
+        .max(1.0)
+        .min(source_height as f64) as u32;
+    let max_x = (source_width - width) as f64;
+    let max_y = (source_height - height) as f64;
+    let x = (pointer_x * scale_x - width as f64 / 2.0)
+        .round()
+        .clamp(0.0, max_x) as u32;
+    let y = (pointer_y * scale_y - height as f64 / 2.0)
+        .round()
+        .clamp(0.0, max_y) as u32;
+
+    Some(CaptureRect {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+fn pixel_at(data: &[u8], width: u32, height: u32, x: u32, y: u32) -> Option<[u8; 4]> {
+    if x >= width || y >= height {
+        return None;
+    }
+    let index = (y as usize)
+        .checked_mul(width as usize)?
+        .checked_add(x as usize)?
+        .checked_mul(4)?;
+    let pixel = data.get(index..index.checked_add(4)?)?;
+    Some([pixel[0], pixel[1], pixel[2], pixel[3]])
 }
 
 impl CompositorHandler for SelectorState {
@@ -1044,13 +1166,27 @@ impl PointerHandler for SelectorState {
             else {
                 continue;
             };
+            if matches!(&event.kind, PointerEventKind::Leave { .. }) {
+                if self.active_surface == Some(index) {
+                    self.active_surface = None;
+                    self.redraw(index, qh);
+                }
+                continue;
+            }
+            let previous_surface = self.active_surface;
             self.active_surface = Some(index);
             self.pointer_position = event.position;
+            if let Some(previous) = previous_surface
+                && previous != index
+            {
+                self.redraw(previous, qh);
+            }
             match event.kind {
                 PointerEventKind::Enter { .. } => {
                     if let Some(pointer) = &self.pointer {
                         let _ = pointer.set_cursor(connection, CursorIcon::Crosshair);
                     }
+                    self.redraw(index, qh);
                 }
                 PointerEventKind::Motion { .. } => {
                     if self.phase == Phase::Select && self.selection.dragging {
@@ -1154,7 +1290,7 @@ impl KeyboardHandler for SelectorState {
                 self.show_cursor = !self.show_cursor;
                 self.redraw_all(qh);
             }
-            Keysym::c | Keysym::C => self.copy_color_at_pointer(),
+            Keysym::c | Keysym::C if self.magnifier => self.copy_color_at_pointer(),
             _ => {}
         }
     }
@@ -2228,6 +2364,81 @@ fn glyph(ch: char) -> [u8; 7] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn magnifier_rect_is_clamped_to_the_output() {
+        for pointer in [
+            (-10.0, -10.0),
+            (0.0, 0.0),
+            (1919.0, 1079.0),
+            (5000.0, 5000.0),
+        ] {
+            let (x, y, width, height) = magnifier_rect(pointer, 1920, 1080, 64, 20).unwrap();
+            assert_eq!((width, height), (64, 64));
+            assert!(x + width <= 1920);
+            assert!(y + height <= 1080);
+        }
+    }
+
+    #[test]
+    fn magnifier_rect_is_skipped_on_outputs_smaller_than_the_loupe() {
+        assert_eq!(magnifier_rect((0.0, 0.0), 63, 1080, 64, 20), None);
+        assert_eq!(magnifier_rect((0.0, 0.0), 1920, 63, 64, 20), None);
+    }
+
+    #[test]
+    fn capture_rect_maps_logical_pointer_to_physical_source() {
+        assert_eq!(
+            capture_rect((100.0, 100.0), 32, 800, 600, 1600, 1200),
+            Some(CaptureRect {
+                x: 168,
+                y: 168,
+                width: 64,
+                height: 64,
+            })
+        );
+        assert_eq!(
+            capture_rect((100.0, 100.0), 32, 1024, 576, 1280, 720),
+            Some(CaptureRect {
+                x: 105,
+                y: 105,
+                width: 40,
+                height: 40,
+            })
+        );
+    }
+
+    #[test]
+    fn capture_rect_stays_inside_the_source_at_edges() {
+        assert_eq!(
+            capture_rect((0.0, 0.0), 32, 800, 600, 1600, 1200),
+            Some(CaptureRect {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            })
+        );
+        assert_eq!(
+            capture_rect((800.0, 600.0), 32, 800, 600, 1600, 1200),
+            Some(CaptureRect {
+                x: 1536,
+                y: 1136,
+                width: 64,
+                height: 64,
+            })
+        );
+    }
+
+    #[test]
+    fn pixel_sampling_rejects_out_of_bounds_coordinates() {
+        let mut data = vec![0; 2 * 2 * 4];
+        data[..4].copy_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(pixel_at(&data, 2, 2, 0, 0), Some([1, 2, 3, 4]));
+        assert_eq!(pixel_at(&data, 2, 2, 2, 0), None);
+        assert_eq!(pixel_at(&data, 2, 2, 0, 2), None);
+    }
+
     #[test]
     fn selection_is_clamped_and_inclusive() {
         let selection = Selection {
