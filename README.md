@@ -59,7 +59,7 @@ system paths.
 ```sh
 dmsshot-rs                 # interactive region
 dmsshot-rs magnifier       # magnifier and color picker, no screenshot
-dmsshot-rs magnifier --zoom 4 --color-format hsl
+dmsshot-rs magnifier --zoom 4
 dmsshot-rs full            # focused output when known, otherwise first output
 dmsshot-rs all             # composite every output
 dmsshot-rs output DP-1     # named output
@@ -77,10 +77,11 @@ uses Enter or Space to confirm, Escape to cancel, `P` to toggle the captured poi
 constrain a drag to a square. Pass `--magnifier` to `region`, `scroll`, or `ocr` to show the cursor
 magnifier and enable color copying with `C`; it is off by default. The standalone `magnifier`
 subcommand shows the same loupe and color picker over an undimmed snapshot without taking a
-screenshot; `C` copies the color and Escape exits. Use `--zoom 1-5` to select the magnification
-(default `2`). Use `--color-format hex|rgb|hsl` to choose the color text shown by the magnifier and
-copied by `C`; the default is `hex`. Color text is always opaque; full-output captures are already
-composited by the compositor, so visually transparent windows still produce opaque colors.
+screenshot; `C` or a left click copies the color and exits. Use `--zoom 1-5` to select the
+magnification (default `2`). While the magnifier is visible, press `Tab` to cycle the color text
+through `hex`, `rgb`, and `hsl`; the default is `hex`. Color text is always opaque; full-output
+captures are already composited by the compositor, so visually transparent windows still produce
+opaque colors.
 Scroll mode finishes with Enter or the Done button. Successful file
 captures are copied and notified by default; use `--no-clipboard` or `--no-notify` to disable either
 integration. When niri is selected, the `window` command relies on niri's native

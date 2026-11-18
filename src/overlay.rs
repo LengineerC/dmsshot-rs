@@ -46,7 +46,6 @@ use wayland_protocols::wp::viewporter::client::{
 
 use crate::{
     backend::{CaptureSource, OutputInfo},
-    cli::ColorFormat,
     error::{Error, Result},
     imagebuf::{ImageBuffer, Region},
     integration,
@@ -59,6 +58,23 @@ const LOUPE_SIZE: u32 = 60;
 const LOUPE_OFFSET: u32 = 20;
 const LOUPE_RADIUS: u32 = 10;
 type PixelRect = (u32, u32, u32, u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColorFormat {
+    Hex,
+    Rgb,
+    Hsl,
+}
+
+impl ColorFormat {
+    fn next(self) -> Self {
+        match self {
+            Self::Hex => Self::Rgb,
+            Self::Rgb => Self::Hsl,
+            Self::Hsl => Self::Hex,
+        }
+    }
+}
 
 pub struct Background {
     pub info: OutputInfo,
@@ -75,7 +91,6 @@ pub struct SelectorOptions {
     pub show_cursor: bool,
     pub magnifier: bool,
     pub zoom: u8,
-    pub color_format: ColorFormat,
     pub theme_source: ThemeSource,
 }
 
@@ -222,13 +237,13 @@ pub fn select_region(
         _viewporter: viewporter.clone(),
         active_surface: None,
         pointer_position: (0.0, 0.0),
-        pointer_color_text: format_color([0, 0, 0, 255], options.color_format, false),
+        pointer_color_text: format_color([0, 0, 0, 255], ColorFormat::Hex, false),
         selection: Selection::default(),
         shift: false,
         show_cursor: options.show_cursor,
         magnifier: options.magnifier || options.mode == SelectorMode::Magnifier,
         zoom: options.zoom.clamp(1, 5),
-        color_format: options.color_format,
+        color_format: ColorFormat::Hex,
         no_confirm: options.no_confirm,
         phase: match options.mode {
             SelectorMode::Screenshot => Phase::Select,
@@ -484,6 +499,7 @@ impl SelectorState {
                         height,
                         self.show_cursor,
                         self.no_confirm,
+                        self.magnifier,
                         self.theme,
                     );
                 }
@@ -987,9 +1003,13 @@ impl SelectorState {
         )
     }
 
-    fn copy_color_at_pointer(&self) {
-        if let Err(err) = integration::copy_text(&self.pointer_color_text) {
-            eprintln!("Failed to copy color: {err}");
+    fn copy_color_at_pointer(&self) -> bool {
+        match integration::copy_text(&self.pointer_color_text) {
+            Ok(()) => true,
+            Err(err) => {
+                eprintln!("Failed to copy color: {err}");
+                false
+            }
         }
     }
 }
@@ -1480,7 +1500,11 @@ impl PointerHandler for SelectorState {
                             };
                             self.redraw_all(qh);
                         }
-                        Phase::Magnifier => {}
+                        Phase::Magnifier => {
+                            if self.copy_color_at_pointer() {
+                                self.running = false;
+                            }
+                        }
                     }
                 }
                 PointerEventKind::Release { button, .. }
@@ -1547,7 +1571,15 @@ impl KeyboardHandler for SelectorState {
                 self.show_cursor = !self.show_cursor;
                 self.redraw_all(qh);
             }
-            Keysym::c | Keysym::C if self.magnifier => self.copy_color_at_pointer(),
+            Keysym::Tab if self.magnifier => {
+                self.color_format = self.color_format.next();
+                self.redraw_all(qh);
+            }
+            Keysym::c | Keysym::C if self.magnifier => {
+                let exit_after_copy =
+                    self.copy_color_at_pointer() && self.phase == Phase::Magnifier;
+                self.running &= !exit_after_copy;
+            }
             _ => {}
         }
     }
@@ -2296,46 +2328,52 @@ fn draw_hud(
     height: u32,
     cursor: bool,
     no_confirm: bool,
+    magnifier: bool,
     theme: Theme,
 ) {
     let capture_key = if no_confirm { "release" } else { "enter" };
     let cursor_desc = if cursor { "hide cursor" } else { "show cursor" };
-    let items = [
-        (capture_key, "capture"),
-        ("p", cursor_desc),
-        ("esc", "cancel"),
-    ];
-    let content_width = items
-        .iter()
-        .map(|(key, desc)| bold_text_width(key) + 6 + text_width(desc))
-        .sum::<u32>()
-        + (items.len() as u32 - 1) * 18;
-    let bar_width = (content_width + 24).min(width);
-    let x = (width - bar_width) / 2;
-    let y = height.saturating_sub(34);
-    draw_hint_bar_background(data, width, height, (x, y, bar_width, 24), theme);
-    let mut text_x = x + 12;
-    for (index, (key, desc)) in items.into_iter().enumerate() {
-        text_x = draw_hint_item(data, width, height, text_x, y + 8, key, desc, theme);
-        if index + 1 < items.len() {
-            text_x += 18;
-        }
+    let mut items = vec![(capture_key, "capture"), ("p", cursor_desc)];
+    if magnifier {
+        items.push(("tab", "format"));
     }
+    items.push(("esc", "cancel"));
+    draw_hint_items(data, width, height, &items, theme);
 }
 
 fn draw_magnifier_hud(data: &mut [u8], width: u32, height: u32, theme: Theme) {
-    let items = [("c", "copy"), ("esc", "exit")];
-    let content_width = items
+    let items = [("tab", "format"), ("click", "copy"), ("esc", "exit")];
+    draw_hint_items(data, width, height, &items, theme);
+}
+
+fn hint_items_width(items: &[(&str, &str)]) -> u32 {
+    items
         .iter()
         .map(|(key, desc)| bold_text_width(key) + 6 + text_width(desc))
         .sum::<u32>()
-        + (items.len() as u32 - 1) * 18;
-    let bar_width = (content_width + 24).min(width);
+        + items.len().saturating_sub(1) as u32 * 18
+}
+
+fn draw_hint_items(data: &mut [u8], width: u32, height: u32, items: &[(&str, &str)], theme: Theme) {
+    let full_width = hint_items_width(items);
+    let compact = full_width.saturating_add(24) > width;
+    let compact_items: Vec<(&str, &str)> = if compact {
+        items.iter().map(|(key, _)| (*key, "")).collect()
+    } else {
+        Vec::new()
+    };
+    let content_width = if compact {
+        hint_items_width(&compact_items)
+    } else {
+        full_width
+    };
+    let bar_width = content_width.saturating_add(24).min(width);
     let x = (width - bar_width) / 2;
     let y = height.saturating_sub(34);
     draw_hint_bar_background(data, width, height, (x, y, bar_width, 24), theme);
     let mut text_x = x + 12;
-    for (index, (key, desc)) in items.into_iter().enumerate() {
+    for (index, (key, desc)) in items.iter().enumerate() {
+        let desc: &str = if compact { "" } else { desc };
         text_x = draw_hint_item(data, width, height, text_x, y + 8, key, desc, theme);
         if index + 1 < items.len() {
             text_x += 18;
@@ -2630,7 +2668,9 @@ fn glyph(ch: char) -> [u8; 7] {
         'g' => [0, 14, 17, 17, 15, 1, 14],
         'h' => [16, 16, 30, 17, 17, 17, 17],
         'i' => [4, 0, 12, 4, 4, 4, 14],
+        'k' => [16, 16, 18, 20, 24, 20, 18],
         'l' => [12, 4, 4, 4, 4, 4, 14],
+        'm' => [0, 26, 21, 21, 21, 21, 21],
         'n' => [0, 30, 17, 17, 17, 17, 17],
         'o' => [0, 14, 17, 17, 17, 17, 14],
         'p' => [0, 30, 17, 17, 30, 16, 16],
@@ -2850,10 +2890,17 @@ mod tests {
 
     #[test]
     fn magnifier_hint_glyphs_are_visible() {
-        for ch in "copyexitcesc".chars() {
+        for ch in "tabformatclickcopyescexit".chars() {
             let glyph = glyph(ch);
             assert!(glyph.iter().any(|row| *row != 0), "missing glyph for {ch}");
         }
+    }
+
+    #[test]
+    fn color_format_cycles_hex_rgb_hsl() {
+        assert_eq!(ColorFormat::Hex.next(), ColorFormat::Rgb);
+        assert_eq!(ColorFormat::Rgb.next(), ColorFormat::Hsl);
+        assert_eq!(ColorFormat::Hsl.next(), ColorFormat::Hex);
     }
 
     #[test]
