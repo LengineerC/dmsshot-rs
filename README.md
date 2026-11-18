@@ -78,8 +78,7 @@ constrain a drag to a square. Pass `--magnifier` to `region`, `scroll`, or `ocr`
 magnifier and enable color copying with `C`; it is off by default. The standalone `magnifier`
 subcommand shows the same loupe and color picker over an undimmed snapshot without taking a
 screenshot; `C` or a left click copies the color and exits. Use `--zoom 1-5` to select the
-magnification (default `2`). While the magnifier is visible, press `Tab` to cycle the color text
-through `hex`, `rgb`, and `hsl`; the default is `hex`. Color text is always opaque; full-output
+magnification (default `2`). While the magnifier is visible, press `Tab` to cycle the color text through `HEX`, `RGB`, and `HSL`; the default is `HEX`. Color text is always opaque; full-output
 captures are already composited by the compositor, so visually transparent windows still produce
 opaque colors.
 Scroll mode finishes with Enter or the Done button. Successful file

@@ -1234,9 +1234,9 @@ fn format_color(color: [u8; 4], format: ColorFormat, compact: bool) -> String {
 fn rgb_color(color: [u8; 4], compact: bool) -> String {
     let [red, green, blue, _] = color;
     if compact {
-        format!("rgb({red},{green},{blue})")
+        format!("RGB({red},{green},{blue})")
     } else {
-        format!("rgb({red}, {green}, {blue})")
+        format!("RGB({red}, {green}, {blue})")
     }
 }
 
@@ -1244,9 +1244,9 @@ fn hsl_color(color: [u8; 4], compact: bool) -> String {
     let [red, green, blue, _] = color;
     let (hue, saturation, lightness) = rgb_to_hsl([red, green, blue]);
     if compact {
-        format!("hsl({hue:.2},{saturation:.2}%,{lightness:.2}%)")
+        format!("HSL({hue:.2},{saturation:.2}%,{lightness:.2}%)")
     } else {
-        format!("hsl({hue:.2}, {saturation:.2}%, {lightness:.2}%)")
+        format!("HSL({hue:.2}, {saturation:.2}%, {lightness:.2}%)")
     }
 }
 
@@ -2623,7 +2623,7 @@ fn draw_text_weight(
     let (x, y) = position;
     let advance = if bold { 7 } else { 6 };
     for (index, ch) in text.chars().enumerate() {
-        let glyph = glyph(ch.to_ascii_lowercase());
+        let glyph = glyph(ch);
         for (row, bits) in glyph.into_iter().enumerate() {
             for col in 0..5 {
                 if bits & (1 << (4 - col)) != 0 {
@@ -2659,6 +2659,17 @@ fn glyph(ch: char) -> [u8; 7] {
         '7' => [31, 1, 2, 4, 8, 8, 8],
         '8' => [14, 17, 17, 14, 17, 17, 14],
         '9' => [14, 17, 17, 15, 1, 1, 14],
+        'A' => [14, 17, 17, 31, 17, 17, 17],
+        'B' => [30, 17, 17, 30, 17, 17, 30],
+        'C' => [14, 17, 16, 16, 16, 17, 14],
+        'D' => [30, 17, 17, 17, 17, 17, 30],
+        'E' => [31, 16, 16, 30, 16, 16, 31],
+        'F' => [31, 16, 16, 30, 16, 16, 16],
+        'G' => [14, 17, 16, 23, 17, 17, 14],
+        'H' => [17, 17, 17, 31, 17, 17, 17],
+        'L' => [16, 16, 16, 16, 16, 16, 31],
+        'R' => [30, 17, 17, 30, 20, 18, 17],
+        'S' => [15, 16, 16, 14, 1, 1, 30],
         'a' => [0, 14, 1, 15, 17, 19, 13],
         'b' => [16, 16, 30, 17, 17, 17, 30],
         'c' => [0, 14, 17, 16, 16, 17, 14],
@@ -2792,24 +2803,24 @@ mod tests {
     }
 
     #[test]
-    fn hex_color_is_always_opaque() {
-        assert_eq!(hex_color([0x12, 0x34, 0x56, 255]), "#123456");
-        assert_eq!(hex_color([0x12, 0x34, 0x56, 0x78]), "#123456");
+    fn hex_color_is_uppercase_and_always_opaque() {
+        assert_eq!(hex_color([0xAB, 0xCD, 0xEF, 255]), "#ABCDEF");
+        assert_eq!(hex_color([0xAB, 0xCD, 0xEF, 0x78]), "#ABCDEF");
     }
 
     #[test]
     fn rgb_color_uses_css_syntax() {
         assert_eq!(
             format_color([0x12, 0x34, 0x56, 255], ColorFormat::Rgb, false),
-            "rgb(18, 52, 86)"
+            "RGB(18, 52, 86)"
         );
         assert_eq!(
             format_color([0x12, 0x34, 0x56, 0x78], ColorFormat::Rgb, false),
-            "rgb(18, 52, 86)"
+            "RGB(18, 52, 86)"
         );
         assert_eq!(
             format_color([0x12, 0x34, 0x56, 0x78], ColorFormat::Rgb, true),
-            "rgb(18,52,86)"
+            "RGB(18,52,86)"
         );
     }
 
@@ -2817,19 +2828,19 @@ mod tests {
     fn hsl_color_uses_css_syntax_and_standard_conversion() {
         assert_eq!(
             format_color([0x12, 0x34, 0x56, 255], ColorFormat::Hsl, false),
-            "hsl(210.00, 65.38%, 20.39%)"
+            "HSL(210.00, 65.38%, 20.39%)"
         );
         assert_eq!(
             format_color([0x12, 0x34, 0x56, 0x78], ColorFormat::Hsl, false),
-            "hsl(210.00, 65.38%, 20.39%)"
+            "HSL(210.00, 65.38%, 20.39%)"
         );
         assert_eq!(
             format_color([0x12, 0x34, 0x56, 0x78], ColorFormat::Hsl, true),
-            "hsl(210.00,65.38%,20.39%)"
+            "HSL(210.00,65.38%,20.39%)"
         );
         assert_eq!(
             format_color([128, 128, 128, 255], ColorFormat::Hsl, false),
-            "hsl(0.00, 0.00%, 50.20%)"
+            "HSL(0.00, 0.00%, 50.20%)"
         );
     }
 
@@ -2878,7 +2889,7 @@ mod tests {
             for alpha in [255, 120] {
                 let text = format_color([0x12, 0x34, 0x56, alpha], format, false);
                 for ch in text.chars().filter(|ch| *ch != ' ') {
-                    let glyph = glyph(ch.to_ascii_lowercase());
+                    let glyph = glyph(ch);
                     assert!(
                         glyph.iter().any(|row| *row != 0),
                         "missing glyph for {ch} in {text}"

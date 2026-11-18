@@ -1,7 +1,7 @@
 # Maintainer: LengineerC
 
 pkgname=dmsshot-rs
-pkgver=0.1.2
+pkgver=0.2.0
 pkgrel=2
 pkgdesc='Native Wayland screenshot, scrolling capture, and OCR utility with niri and KWin integration'
 arch=('x86_64')
