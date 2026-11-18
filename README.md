@@ -58,12 +58,15 @@ system paths.
 
 ```sh
 dmsshot-rs                 # interactive region
+dmsshot-rs magnifier       # magnifier and color picker, no screenshot
+dmsshot-rs magnifier --zoom 4 --color-format hsl
 dmsshot-rs full            # focused output when known, otherwise first output
 dmsshot-rs all             # composite every output
 dmsshot-rs output DP-1     # named output
 dmsshot-rs window          # focused window (niri or KDE Plasma/KWin)
 dmsshot-rs scroll          # interactive scrolling capture
 dmsshot-rs ocr             # recognize text in an interactive region
+dmsshot-rs region --magnifier --zoom 2
 dmsshot-rs list            # output information
 dmsshot-rs --be niri full  # force the niri backend
 dmsshot-rs --be kde window # force the KDE/KWin backend
@@ -71,11 +74,13 @@ dmsshot-rs --be kde window # force the KDE/KWin backend
 
 Run `dmsshot-rs --help` for image format, destination, cursor, JSON, and stdout options. Region mode
 uses Enter or Space to confirm, Escape to cancel, `P` to toggle the captured pointer, and Shift to
-constrain a drag to a square. Pass `--magnifier` to show the cursor magnifier and enable color
-copying with `C`; it is off by default. Use `--color-format hex|rgb|hsl` together with
-`--magnifier` to choose the color text shown by the magnifier and copied by `C`; the default is
-`hex`. Color text is always opaque; full-output captures are already composited by the compositor,
-so visually transparent windows still produce opaque colors.
+constrain a drag to a square. Pass `--magnifier` to `region`, `scroll`, or `ocr` to show the cursor
+magnifier and enable color copying with `C`; it is off by default. The standalone `magnifier`
+subcommand shows the same loupe and color picker over an undimmed snapshot without taking a
+screenshot; `C` copies the color and Escape exits. Use `--zoom 1-5` to select the magnification
+(default `2`). Use `--color-format hex|rgb|hsl` to choose the color text shown by the magnifier and
+copied by `C`; the default is `hex`. Color text is always opaque; full-output captures are already
+composited by the compositor, so visually transparent windows still produce opaque colors.
 Scroll mode finishes with Enter or the Done button. Successful file
 captures are copied and notified by default; use `--no-clipboard` or `--no-notify` to disable either
 integration. When niri is selected, the `window` command relies on niri's native

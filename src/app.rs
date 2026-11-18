@@ -13,7 +13,7 @@ use crate::{
     error::{Error, Result},
     imagebuf::ImageBuffer,
     integration, ocr,
-    overlay::{self, Background, SelectorOptions, ThemeSource},
+    overlay::{self, Background, SelectorMode, SelectorOptions, ThemeSource},
     state,
     wayland::WaylandCapture,
 };
@@ -61,6 +61,9 @@ impl Application {
         if command == Command::List {
             return self.list_outputs();
         }
+        if command == Command::Magnifier {
+            return self.run_magnifier();
+        }
         if let Command::Ocr {
             engine,
             model_dir,
@@ -89,6 +92,7 @@ impl Application {
                 Some(self.capture_named(&name)?)
             }
             Command::Region => self.capture_interactive(false, 45)?,
+            Command::Magnifier => unreachable!(),
             Command::Scroll { interval } => self.capture_interactive(true, interval)?,
             Command::Ocr { .. } => unreachable!(),
             Command::List => unreachable!(),
@@ -158,6 +162,45 @@ impl Application {
         if !self.cli.no_notify {
             integration::notify_ocr_success(copied);
         }
+        Ok(())
+    }
+
+    fn run_magnifier(&self) -> Result<()> {
+        let mut capture = self.backend.capture_session()?;
+        let outputs = capture.outputs();
+        if outputs.is_empty() {
+            return Err(Error::NoOutputs);
+        }
+        let mut backgrounds = Vec::with_capacity(outputs.len());
+        for info in outputs {
+            let with_cursor = capture.capture_output(&info, true)?;
+            let without_cursor = capture.capture_output(&info, false)?;
+            backgrounds.push(Background {
+                info,
+                with_cursor,
+                without_cursor,
+            });
+        }
+        overlay::select_region(
+            backgrounds,
+            SelectorOptions {
+                mode: SelectorMode::Magnifier,
+                no_confirm: false,
+                scroll: false,
+                interval: Duration::from_millis(45),
+                initial: Default::default(),
+                show_cursor: self.cli.cursor.enabled(),
+                magnifier: true,
+                zoom: self.cli.zoom(),
+                color_format: self.cli.color_format(),
+                theme_source: if self.cli.qt {
+                    ThemeSource::Qt
+                } else {
+                    ThemeSource::Gtk
+                },
+            },
+            &mut capture,
+        )?;
         Ok(())
     }
 
@@ -257,13 +300,15 @@ impl Application {
         let mut image = overlay::select_region(
             backgrounds,
             SelectorOptions {
+                mode: SelectorMode::Screenshot,
                 no_confirm: self.cli.no_confirm,
                 scroll,
                 interval: Duration::from_millis(interval_ms),
                 initial: state::load_last_region(),
                 show_cursor: self.cli.cursor.enabled(),
                 magnifier: self.cli.magnifier,
-                color_format: self.cli.color_format,
+                zoom: self.cli.zoom(),
+                color_format: self.cli.color_format(),
                 theme_source: if self.cli.qt {
                     ThemeSource::Qt
                 } else {

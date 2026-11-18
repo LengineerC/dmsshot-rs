@@ -55,6 +55,9 @@ use crate::{
 
 const LEFT_BUTTON: u32 = 0x110;
 const SCROLL_SEAM_TICKS: u8 = 4;
+const LOUPE_SIZE: u32 = 60;
+const LOUPE_OFFSET: u32 = 20;
+const LOUPE_RADIUS: u32 = 10;
 type PixelRect = (u32, u32, u32, u32);
 
 pub struct Background {
@@ -64,14 +67,22 @@ pub struct Background {
 }
 
 pub struct SelectorOptions {
+    pub mode: SelectorMode,
     pub no_confirm: bool,
     pub scroll: bool,
     pub interval: Duration,
     pub initial: Region,
     pub show_cursor: bool,
     pub magnifier: bool,
+    pub zoom: u8,
     pub color_format: ColorFormat,
     pub theme_source: ThemeSource,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SelectorMode {
+    Screenshot,
+    Magnifier,
 }
 
 #[derive(Clone, Copy)]
@@ -116,6 +127,7 @@ struct Selection {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Select,
+    Magnifier,
     Scroll,
 }
 
@@ -157,6 +169,7 @@ struct SelectorState {
     shift: bool,
     show_cursor: bool,
     magnifier: bool,
+    zoom: u8,
     color_format: ColorFormat,
     no_confirm: bool,
     phase: Phase,
@@ -213,12 +226,16 @@ pub fn select_region(
         selection: Selection::default(),
         shift: false,
         show_cursor: options.show_cursor,
-        magnifier: options.magnifier,
+        magnifier: options.magnifier || options.mode == SelectorMode::Magnifier,
+        zoom: options.zoom.clamp(1, 5),
         color_format: options.color_format,
         no_confirm: options.no_confirm,
-        phase: Phase::Select,
+        phase: match options.mode {
+            SelectorMode::Screenshot => Phase::Select,
+            SelectorMode::Magnifier => Phase::Magnifier,
+        },
         scroll: None,
-        scroll_requested: options.scroll,
+        scroll_requested: options.scroll && options.mode == SelectorMode::Screenshot,
         interval: options.interval,
         running: true,
         cancelled: false,
@@ -274,7 +291,9 @@ pub fn select_region(
         });
     }
     state.install_shortcut_inhibitors(&qh);
-    state.apply_initial(options.initial);
+    if options.mode == SelectorMode::Screenshot {
+        state.apply_initial(options.initial);
+    }
 
     let mut event_loop: EventLoop<SelectorState> =
         EventLoop::try_new().map_err(|err| Error::Wayland(format!("event loop: {err}")))?;
@@ -412,96 +431,128 @@ impl SelectorState {
     }
 
     fn render(&mut self, index: usize, width: u32, height: u32) -> Vec<u8> {
-        if self.phase == Phase::Select {
-            // 选择阶段
-            let rect = (self.selection.present && self.selection.surface == Some(index))
-                .then(|| selection_rect(&self.selection, width, height));
-            let show_cursor = self.show_cursor;
-            let mut rgba = {
-                let surface = &mut self.surfaces[index];
-                let preview = if show_cursor {
-                    prepare_preview(
-                        &surface.with_cursor,
-                        &mut surface.with_cursor_preview,
-                        width,
-                        height,
-                    )
-                } else {
-                    prepare_preview(
-                        &surface.without_cursor,
-                        &mut surface.without_cursor_preview,
-                        width,
-                        height,
-                    )
-                };
-                let mut rgba = std::mem::take(&mut surface.render_buffer);
-                rgba.clone_from(&preview.dimmed);
-                if let Some(rect) = rect {
-                    let row_bytes = rect.2 as usize * 4;
-                    for y in rect.1..rect.1 + rect.3 {
-                        let start = (y as usize * width as usize + rect.0 as usize) * 4;
-                        let end = start + row_bytes;
-                        rgba[start..end].copy_from_slice(&preview.normal[start..end]);
+        match self.phase {
+            Phase::Select => {
+                // 选择阶段
+                let rect = (self.selection.present && self.selection.surface == Some(index))
+                    .then(|| selection_rect(&self.selection, width, height));
+                let show_cursor = self.show_cursor;
+                let mut rgba = {
+                    let surface = &mut self.surfaces[index];
+                    let preview = if show_cursor {
+                        prepare_preview(
+                            &surface.with_cursor,
+                            &mut surface.with_cursor_preview,
+                            width,
+                            height,
+                        )
+                    } else {
+                        prepare_preview(
+                            &surface.without_cursor,
+                            &mut surface.without_cursor_preview,
+                            width,
+                            height,
+                        )
+                    };
+                    let mut rgba = std::mem::take(&mut surface.render_buffer);
+                    rgba.clone_from(&preview.dimmed);
+                    if let Some(rect) = rect {
+                        let row_bytes = rect.2 as usize * 4;
+                        for y in rect.1..rect.1 + rect.3 {
+                            let start = (y as usize * width as usize + rect.0 as usize) * 4;
+                            let end = start + row_bytes;
+                            rgba[start..end].copy_from_slice(&preview.normal[start..end]);
+                        }
                     }
-                }
-                rgba
-            };
-            if let Some(rect) = rect {
-                draw_selection_border(&mut rgba, width, height, rect, self.theme);
-                draw_label(
-                    &mut rgba,
-                    width,
-                    height,
-                    rect,
-                    &format!("{}x{}", rect.2, rect.3),
-                    self.theme,
-                );
-            }
-            if !self.selection.dragging {
-                draw_hud(
-                    &mut rgba,
-                    width,
-                    height,
-                    self.show_cursor,
-                    self.no_confirm,
-                    self.theme,
-                );
-            }
-            // 放大镜只属于指针当前所在的输出，避免用一块屏幕的坐标渲染另一块屏幕。
-            if self.magnifier && self.active_surface == Some(index) {
-                self.draw_follow_mouse_rect(&mut rgba, width, height, index);
-            }
-            rgba
-        } else {
-            let mut rgba = std::mem::take(&mut self.surfaces[index].render_buffer);
-            rgba.resize(width as usize * height as usize * 4, 0);
-            for pixel in rgba.chunks_exact_mut(4) {
-                pixel.copy_from_slice(&[0, 0, 0, 102]);
-            }
-            if let Some(scroll) = &self.scroll
-                && self.selection.surface == Some(index)
-            {
-                let rect = (
-                    scroll.local_region.x.max(0) as u32,
-                    scroll.local_region.y.max(0) as u32,
-                    scroll.local_region.width.max(1) as u32,
-                    scroll.local_region.height.max(1) as u32,
-                );
-                clear_rect(&mut rgba, width, height, rect);
-                draw_outside_border(&mut rgba, width, height, rect, self.theme.accent);
-                if let Some(bar) = scroll.bar {
-                    draw_scroll_bar(
+                    rgba
+                };
+                if let Some(rect) = rect {
+                    draw_selection_border(&mut rgba, width, height, rect, self.theme);
+                    draw_label(
                         &mut rgba,
                         width,
                         height,
-                        bar,
-                        scroll.kept,
-                        scroll.stitcher.as_ref().map_or(0, Stitcher::rows),
+                        rect,
+                        &format!("{}x{}", rect.2, rect.3),
                         self.theme,
                     );
                 }
+                if !self.selection.dragging {
+                    draw_hud(
+                        &mut rgba,
+                        width,
+                        height,
+                        self.show_cursor,
+                        self.no_confirm,
+                        self.theme,
+                    );
+                }
+                // 放大镜只属于指针当前所在的输出，避免用一块屏幕的坐标渲染另一块屏幕。
+                if self.magnifier && self.active_surface == Some(index) {
+                    self.draw_follow_mouse_rect(&mut rgba, width, height, index);
+                }
+                rgba
             }
-            rgba
+            Phase::Magnifier => {
+                let show_cursor = self.show_cursor;
+                let mut rgba = {
+                    let surface = &mut self.surfaces[index];
+                    let preview = if show_cursor {
+                        prepare_preview(
+                            &surface.with_cursor,
+                            &mut surface.with_cursor_preview,
+                            width,
+                            height,
+                        )
+                    } else {
+                        prepare_preview(
+                            &surface.without_cursor,
+                            &mut surface.without_cursor_preview,
+                            width,
+                            height,
+                        )
+                    };
+                    let mut rgba = std::mem::take(&mut surface.render_buffer);
+                    rgba.clone_from(&preview.normal);
+                    rgba
+                };
+                draw_magnifier_hud(&mut rgba, width, height, self.theme);
+                if self.active_surface == Some(index) {
+                    self.draw_follow_mouse_rect(&mut rgba, width, height, index);
+                }
+                rgba
+            }
+            Phase::Scroll => {
+                let mut rgba = std::mem::take(&mut self.surfaces[index].render_buffer);
+                rgba.resize(width as usize * height as usize * 4, 0);
+                for pixel in rgba.chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&[0, 0, 0, 102]);
+                }
+                if let Some(scroll) = &self.scroll
+                    && self.selection.surface == Some(index)
+                {
+                    let rect = (
+                        scroll.local_region.x.max(0) as u32,
+                        scroll.local_region.y.max(0) as u32,
+                        scroll.local_region.width.max(1) as u32,
+                        scroll.local_region.height.max(1) as u32,
+                    );
+                    clear_rect(&mut rgba, width, height, rect);
+                    draw_outside_border(&mut rgba, width, height, rect, self.theme.accent);
+                    if let Some(bar) = scroll.bar {
+                        draw_scroll_bar(
+                            &mut rgba,
+                            width,
+                            height,
+                            bar,
+                            scroll.kept,
+                            scroll.stitcher.as_ref().map_or(0, Stitcher::rows),
+                            self.theme,
+                        );
+                    }
+                }
+                rgba
+            }
         }
     }
 
@@ -778,9 +829,9 @@ impl SelectorState {
         if !self.magnifier || self.active_surface != Some(index) {
             return;
         }
-        let size: u32 = 64;
-        let offset: u32 = 20;
-        let radius: u32 = 10;
+        let size = LOUPE_SIZE;
+        let offset = LOUPE_OFFSET;
+        let radius = LOUPE_RADIUS;
         let Some(rect) = magnifier_rect(self.pointer_position, width, height, size, offset) else {
             return;
         };
@@ -801,7 +852,8 @@ impl SelectorState {
             return;
         };
         let mouse_pixel = [pixel[0], pixel[1], pixel[2], 255];
-        if let Some(captured) = self.capture_around_mouse(index, size / 2) {
+        let source_size = magnifier_source_size(size, self.zoom);
+        if let Some(captured) = self.capture_around_mouse(index, source_size) {
             let src_w: usize = captured.width as usize;
             let src_h: usize = captured.height as usize;
             let scale_x: f32 = size as f32 / src_w as f32;
@@ -897,14 +949,18 @@ impl SelectorState {
             source.width,
             source.height,
         )?;
-        source
+        let mut image = source
             .crop(
                 rect.x as i32,
                 rect.y as i32,
                 rect.width as i32,
                 rect.height as i32,
             )
-            .ok()
+            .ok()?;
+        for pixel in image.pixels.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        Some(image)
     }
 
     fn source_pixel_at(&self, index: usize, x: u32, y: u32) -> Option<[u8; 4]> {
@@ -985,6 +1041,10 @@ fn magnifier_rect(
         .round()
         .clamp(0.0, height.saturating_sub(size) as f64) as u32;
     Some((x, y, size, size))
+}
+
+fn magnifier_source_size(size: u32, zoom: u8) -> u32 {
+    (size / u32::from(zoom.clamp(1, 5))).max(1)
 }
 
 fn capture_rect(
@@ -1396,27 +1456,31 @@ impl PointerHandler for SelectorState {
                     self.redraw(index, qh);
                 }
                 PointerEventKind::Press { button, .. } if button == LEFT_BUTTON => {
-                    if self.phase == Phase::Scroll {
-                        let hit = self
-                            .scroll
-                            .as_ref()
-                            .and_then(|scroll| scroll.bar)
-                            .map_or(0, |bar| scroll_bar_hit(bar, event.position));
-                        if hit == 1 {
-                            self.finish_scroll();
-                        } else if hit == 2 {
-                            self.cancelled = true;
-                            self.running = false;
+                    match self.phase {
+                        Phase::Scroll => {
+                            let hit = self
+                                .scroll
+                                .as_ref()
+                                .and_then(|scroll| scroll.bar)
+                                .map_or(0, |bar| scroll_bar_hit(bar, event.position));
+                            if hit == 1 {
+                                self.finish_scroll();
+                            } else if hit == 2 {
+                                self.cancelled = true;
+                                self.running = false;
+                            }
                         }
-                    } else {
-                        self.selection = Selection {
-                            surface: Some(index),
-                            anchor: event.position,
-                            current: event.position,
-                            dragging: true,
-                            present: true,
-                        };
-                        self.redraw_all(qh);
+                        Phase::Select => {
+                            self.selection = Selection {
+                                surface: Some(index),
+                                anchor: event.position,
+                                current: event.position,
+                                dragging: true,
+                                present: true,
+                            };
+                            self.redraw_all(qh);
+                        }
+                        Phase::Magnifier => {}
                     }
                 }
                 PointerEventKind::Release { button, .. }
@@ -1577,6 +1641,9 @@ fn prepare_preview<'a>(
                 normal[target_index..target_index + 4]
                     .copy_from_slice(&source.pixels[source_index..source_index + 4]);
             }
+        }
+        for pixel in normal.chunks_exact_mut(4) {
+            pixel[3] = 255;
         }
         let mut dimmed = normal.clone();
         for pixel in dimmed.chunks_exact_mut(4) {
@@ -2256,6 +2323,26 @@ fn draw_hud(
     }
 }
 
+fn draw_magnifier_hud(data: &mut [u8], width: u32, height: u32, theme: Theme) {
+    let items = [("c", "copy"), ("esc", "exit")];
+    let content_width = items
+        .iter()
+        .map(|(key, desc)| bold_text_width(key) + 6 + text_width(desc))
+        .sum::<u32>()
+        + (items.len() as u32 - 1) * 18;
+    let bar_width = (content_width + 24).min(width);
+    let x = (width - bar_width) / 2;
+    let y = height.saturating_sub(34);
+    draw_hint_bar_background(data, width, height, (x, y, bar_width, 24), theme);
+    let mut text_x = x + 12;
+    for (index, (key, desc)) in items.into_iter().enumerate() {
+        text_x = draw_hint_item(data, width, height, text_x, y + 8, key, desc, theme);
+        if index + 1 < items.len() {
+            text_x += 18;
+        }
+    }
+}
+
 fn scroll_bar_geometry(width: u32, height: u32, avoid: PixelRect) -> Option<PixelRect> {
     if width == 0 || height == 0 {
         return None;
@@ -2553,6 +2640,7 @@ fn glyph(ch: char) -> [u8; 7] {
         'u' => [0, 17, 17, 17, 17, 19, 13],
         'w' => [0, 17, 17, 21, 21, 21, 10],
         'x' => [0, 17, 10, 4, 10, 17, 0],
+        'y' => [0, 17, 17, 17, 15, 1, 14],
         '(' => [2, 4, 8, 8, 8, 4, 2],
         ')' => [8, 4, 2, 2, 2, 4, 8],
         ',' => [0, 0, 0, 0, 0, 4, 8],
@@ -2586,6 +2674,15 @@ mod tests {
     fn magnifier_rect_is_skipped_on_outputs_smaller_than_the_loupe() {
         assert_eq!(magnifier_rect((0.0, 0.0), 63, 1080, 64, 20), None);
         assert_eq!(magnifier_rect((0.0, 0.0), 1920, 63, 64, 20), None);
+    }
+
+    #[test]
+    fn magnifier_zoom_maps_to_integer_source_pixels() {
+        assert_eq!(magnifier_source_size(60, 1), 60);
+        assert_eq!(magnifier_source_size(60, 2), 30);
+        assert_eq!(magnifier_source_size(60, 3), 20);
+        assert_eq!(magnifier_source_size(60, 4), 15);
+        assert_eq!(magnifier_source_size(60, 5), 12);
     }
 
     #[test]
@@ -2748,6 +2845,14 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn magnifier_hint_glyphs_are_visible() {
+        for ch in "copyexitcesc".chars() {
+            let glyph = glyph(ch);
+            assert!(glyph.iter().any(|row| *row != 0), "missing glyph for {ch}");
         }
     }
 

@@ -68,6 +68,8 @@ impl OutputFormat {
 pub enum Command {
     /// Select a region interactively.
     Region,
+    /// Open the cursor magnifier and color picker without taking a screenshot.
+    Magnifier,
     /// Capture the focused output.
     Full,
     /// Capture all outputs into one image.
@@ -125,13 +127,17 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = CursorMode::Off, global = true)]
     pub cursor: CursorMode,
 
-    /// Show the cursor magnifier in interactive selectors and enable color copying with C.
+    /// Show the cursor magnifier in region, scroll, and OCR selectors, and enable color copying with C.
     #[arg(long, global = true)]
     pub magnifier: bool,
 
-    /// Color text used by the magnifier and C key.
-    #[arg(long, value_enum, default_value_t = ColorFormat::Hex, requires = "magnifier", global = true)]
-    pub color_format: ColorFormat,
+    /// Magnifier zoom level, 1-5 (default 2).
+    #[arg(long = "zoom", value_name = "ZOOM", global = true, value_parser = clap::value_parser!(u8).range(1..=5))]
+    pub magnifier_zoom: Option<u8>,
+
+    /// Color text used by the magnifier and C key (default hex).
+    #[arg(long, value_enum, global = true)]
+    pub color_format: Option<ColorFormat>,
 
     /// Image format.
     #[arg(short = 'f', long = "format", value_enum, default_value_t = OutputFormat::Png, global = true)]
@@ -191,6 +197,51 @@ impl Cli {
         self.command.clone().unwrap_or(Command::Region)
     }
 
+    pub fn zoom(&self) -> u8 {
+        self.magnifier_zoom.unwrap_or(2)
+    }
+
+    pub fn color_format(&self) -> ColorFormat {
+        self.color_format.unwrap_or(ColorFormat::Hex)
+    }
+
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        let command = self.command();
+        let interactive = matches!(
+            command,
+            Command::Region | Command::Scroll { .. } | Command::Ocr { .. }
+        );
+        let standalone = command == Command::Magnifier;
+
+        if standalone {
+            return Ok(());
+        }
+        if !interactive {
+            if self.magnifier {
+                return Err(
+                    "--magnifier is only supported for region, scroll, ocr, or the magnifier subcommand"
+                        .into(),
+                );
+            }
+            if self.magnifier_zoom.is_some() {
+                return Err("--zoom requires --magnifier or the magnifier subcommand".into());
+            }
+            if self.color_format.is_some() {
+                return Err(
+                    "--color-format requires --magnifier or the magnifier subcommand".into(),
+                );
+            }
+        } else if !self.magnifier {
+            if self.magnifier_zoom.is_some() {
+                return Err("--zoom requires --magnifier".into());
+            }
+            if self.color_format.is_some() {
+                return Err("--color-format requires --magnifier".into());
+            }
+        }
+        Ok(())
+    }
+
     pub fn output_name(&self, positional: Option<&str>) -> Option<String> {
         positional
             .map(ToOwned::to_owned)
@@ -211,31 +262,80 @@ mod tests {
         let cli = Cli::try_parse_from(["dmsshot"]).unwrap();
         assert_eq!(cli.command(), Command::Region);
         assert_eq!(cli.format, OutputFormat::Png);
-        assert_eq!(cli.color_format, ColorFormat::Hex);
+        assert_eq!(cli.color_format(), ColorFormat::Hex);
+        assert_eq!(cli.zoom(), 2);
         assert!(!cli.magnifier);
+        assert!(cli.validate().is_ok());
     }
 
     #[test]
     fn magnifier_can_be_enabled_globally() {
         let cli = Cli::try_parse_from(["dmsshot", "--magnifier", "region"]).unwrap();
         assert!(cli.magnifier);
+        assert!(cli.validate().is_ok());
         let cli = Cli::try_parse_from(["dmsshot", "ocr", "--magnifier"]).unwrap();
         assert!(cli.magnifier);
+        assert!(cli.validate().is_ok());
     }
 
     #[test]
-    fn color_format_is_global_and_requires_the_magnifier() {
+    fn color_format_requires_an_active_magnifier() {
         let cli = Cli::try_parse_from(["dmsshot", "--color-format", "rgb", "--magnifier"]).unwrap();
-        assert_eq!(cli.color_format, ColorFormat::Rgb);
+        assert_eq!(cli.color_format(), ColorFormat::Rgb);
+        assert!(cli.validate().is_ok());
 
         let cli =
             Cli::try_parse_from(["dmsshot", "region", "--magnifier", "--color-format", "hsl"])
                 .unwrap();
-        assert_eq!(cli.color_format, ColorFormat::Hsl);
+        assert_eq!(cli.color_format(), ColorFormat::Hsl);
+        assert!(cli.validate().is_ok());
 
-        assert!(Cli::try_parse_from(["dmsshot", "--color-format", "rgb"]).is_err());
-        assert!(Cli::try_parse_from(["dmsshot", "--color-format", "hex", "region"]).is_err());
+        let cli = Cli::try_parse_from(["dmsshot", "--color-format", "rgb"]).unwrap();
+        assert!(cli.validate().is_err());
+        let cli = Cli::try_parse_from(["dmsshot", "--color-format", "hex", "region"]).unwrap();
+        assert!(cli.validate().is_err());
         assert!(Cli::try_parse_from(["dmsshot", "--magnifier", "--color-format", "cmyk"]).is_err());
+    }
+
+    #[test]
+    fn magnifier_subcommand_uses_zoom_and_color_format() {
+        let cli = Cli::try_parse_from(["dmsshot", "magnifier"]).unwrap();
+        assert_eq!(cli.command(), Command::Magnifier);
+        assert_eq!(cli.zoom(), 2);
+        assert_eq!(cli.color_format(), ColorFormat::Hex);
+        assert!(cli.validate().is_ok());
+
+        let cli = Cli::try_parse_from([
+            "dmsshot",
+            "magnifier",
+            "--zoom",
+            "5",
+            "--color-format",
+            "hsl",
+        ])
+        .unwrap();
+        assert_eq!(cli.zoom(), 5);
+        assert_eq!(cli.color_format(), ColorFormat::Hsl);
+        assert!(cli.validate().is_ok());
+
+        assert!(Cli::try_parse_from(["dmsshot", "magnifier", "--zoom", "0"]).is_err());
+        assert!(Cli::try_parse_from(["dmsshot", "magnifier", "--zoom", "6"]).is_err());
+    }
+
+    #[test]
+    fn magnifier_is_limited_to_interactive_screenshot_commands() {
+        let cli = Cli::try_parse_from(["dmsshot", "region", "--magnifier", "--zoom", "3"]).unwrap();
+        assert!(cli.validate().is_ok());
+
+        for command in ["full", "all", "window", "list"] {
+            let cli = Cli::try_parse_from(["dmsshot", command, "--magnifier"]).unwrap();
+            assert!(cli.validate().is_err(), "{command} accepted --magnifier");
+        }
+
+        let cli = Cli::try_parse_from(["dmsshot", "region", "--zoom", "3"]).unwrap();
+        assert!(cli.validate().is_err());
+        let cli = Cli::try_parse_from(["dmsshot", "region", "--color-format", "hsl"]).unwrap();
+        assert!(cli.validate().is_err());
     }
 
     #[test]
