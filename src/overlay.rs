@@ -48,6 +48,7 @@ use crate::{
     backend::{CaptureSource, OutputInfo},
     error::{Error, Result},
     imagebuf::{ImageBuffer, Region},
+    integration,
     stitch::{Stitcher, duplicate_frame},
 };
 
@@ -67,6 +68,7 @@ pub struct SelectorOptions {
     pub interval: Duration,
     pub initial: Region,
     pub show_cursor: bool,
+    pub magnifier: bool,
     pub theme_source: ThemeSource,
 }
 
@@ -148,9 +150,11 @@ struct SelectorState {
     _viewporter: WpViewporter,
     active_surface: Option<usize>,
     pointer_position: (f64, f64),
+    pointer_color: [u8; 4],
     selection: Selection,
     shift: bool,
     show_cursor: bool,
+    magnifier: bool,
     no_confirm: bool,
     phase: Phase,
     scroll: Option<ScrollState>,
@@ -202,9 +206,11 @@ pub fn select_region(
         _viewporter: viewporter.clone(),
         active_surface: None,
         pointer_position: (0.0, 0.0),
+        pointer_color: [0, 0, 0, 255],
         selection: Selection::default(),
         shift: false,
         show_cursor: options.show_cursor,
+        magnifier: options.magnifier,
         no_confirm: options.no_confirm,
         phase: Phase::Select,
         scroll: None,
@@ -403,6 +409,7 @@ impl SelectorState {
 
     fn render(&mut self, index: usize, width: u32, height: u32) -> Vec<u8> {
         if self.phase == Phase::Select {
+            // 选择阶段
             let rect = (self.selection.present && self.selection.surface == Some(index))
                 .then(|| selection_rect(&self.selection, width, height));
             let show_cursor = self.show_cursor;
@@ -455,6 +462,10 @@ impl SelectorState {
                     self.no_confirm,
                     self.theme,
                 );
+            }
+            // 放大镜只属于指针当前所在的输出，避免用一块屏幕的坐标渲染另一块屏幕。
+            if self.magnifier && self.active_surface == Some(index) {
+                self.draw_follow_mouse_rect(&mut rgba, width, height, index);
             }
             rgba
         } else {
@@ -757,6 +768,315 @@ impl SelectorState {
         }
         self.running = false;
     }
+
+    // 绘制跟随鼠标的矩形
+    fn draw_follow_mouse_rect(&mut self, data: &mut [u8], width: u32, height: u32, index: usize) {
+        if !self.magnifier || self.active_surface != Some(index) {
+            return;
+        }
+        let size: u32 = 64;
+        let offset: u32 = 20;
+        let radius: u32 = 10;
+        let Some(rect) = magnifier_rect(self.pointer_position, width, height, size, offset) else {
+            return;
+        };
+
+        // 先读取指针对应的像素，再绘制放大镜，避免边缘夹取后读到放大镜自身。
+        let pointer_x = self
+            .pointer_position
+            .0
+            .clamp(0.0, width.saturating_sub(1) as f64) as u32;
+        let pointer_y = self
+            .pointer_position
+            .1
+            .clamp(0.0, height.saturating_sub(1) as f64) as u32;
+        let Some(mouse_pixel) = pixel_at(data, width, height, pointer_x, pointer_y) else {
+            return;
+        };
+        self.pointer_color = mouse_pixel;
+
+        if let Some(captured) = self.capture_around_mouse(index, size / 2) {
+            let src_w: usize = captured.width as usize;
+            let src_h: usize = captured.height as usize;
+            let scale_x: f32 = size as f32 / src_w as f32;
+            let scale_y: f32 = size as f32 / src_h as f32;
+
+            // 遍历矩形
+            for dst_y in 0..size {
+                // 当前行到上下边的距离
+                let dy = if dst_y < radius {
+                    radius - dst_y
+                } else if dst_y >= size - radius {
+                    dst_y - (size - radius - 1)
+                } else {
+                    0
+                };
+
+                // 当前行左侧该缩进多少
+                let mut inset = 0;
+                if dy > 0 {
+                    inset = radius;
+                    for candidate in 0..=radius {
+                        let dx = radius - candidate;
+                        if dx * dx + dy * dy <= radius * radius {
+                            inset = candidate;
+                            break;
+                        }
+                    }
+                }
+
+                for dst_x in inset..(size - inset) {
+                    // 在屏幕上的坐标
+                    let px = rect.0 + dst_x;
+                    let py = rect.1 + dst_y;
+                    if px >= width || py >= height {
+                        continue;
+                    }
+
+                    let src_x: usize = (dst_x as f32 / scale_x).min(src_w as f32 - 1.0) as usize;
+                    let src_y: usize = (dst_y as f32 / scale_y).min(src_h as f32 - 1.0) as usize;
+                    let src_idx: usize = (src_y * src_w + src_x) * 4;
+                    let dst_idx: usize = ((py * width + px) * 4) as usize;
+
+                    data[dst_idx..dst_idx + 4]
+                        .copy_from_slice(&captured.pixels[src_idx..src_idx + 4]);
+                }
+            }
+        } else {
+            fill_rounded_rect(data, width, height, rect, 5, self.theme.accent);
+        }
+        let color_text = hex_color(mouse_pixel);
+        let (color_block, label) = color_badge_layout(rect, width, height, &color_text);
+
+        fill_rounded_rect(data, width, height, color_block, 5, mouse_pixel);
+        fill_rounded_rect(
+            data,
+            width,
+            height,
+            label.background,
+            4,
+            self.theme.background,
+        );
+        draw_text(
+            data,
+            width,
+            height,
+            label.text.0,
+            label.text.1,
+            &color_text,
+            self.theme.text,
+        );
+
+        draw_pos_line(data, width, height, rect, 1, [0, 255, 0, 128]);
+    }
+
+    fn capture_around_mouse(&self, index: usize, size: u32) -> Option<ImageBuffer> {
+        let surface = self.surfaces.get(index)?;
+        let source = if self.show_cursor {
+            &surface.with_cursor
+        } else {
+            &surface.without_cursor
+        };
+        let rect = capture_rect(
+            self.pointer_position,
+            size,
+            surface.logical_width,
+            surface.logical_height,
+            source.width,
+            source.height,
+        )?;
+        source
+            .crop(
+                rect.x as i32,
+                rect.y as i32,
+                rect.width as i32,
+                rect.height as i32,
+            )
+            .ok()
+    }
+
+    fn copy_color_at_pointer(&self) {
+        let mouse_pixel = self.pointer_color;
+        let color_string = hex_color(mouse_pixel);
+        if let Err(err) = integration::copy_text(&color_string) {
+            eprintln!("Failed to copy color: {err}");
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+fn magnifier_rect(
+    pointer: (f64, f64),
+    width: u32,
+    height: u32,
+    size: u32,
+    offset: u32,
+) -> Option<PixelRect> {
+    if size == 0 || width < size || height < size {
+        return None;
+    }
+    let pointer_x = if pointer.0.is_finite() {
+        pointer.0.clamp(0.0, width.saturating_sub(1) as f64)
+    } else {
+        0.0
+    };
+    let pointer_y = if pointer.1.is_finite() {
+        pointer.1.clamp(0.0, height.saturating_sub(1) as f64)
+    } else {
+        0.0
+    };
+
+    let preferred_x = if pointer_x + offset as f64 + size as f64 <= width as f64 {
+        pointer_x + offset as f64
+    } else {
+        pointer_x - offset as f64 - size as f64
+    };
+    let preferred_y = if pointer_y + offset as f64 + size as f64 <= height as f64 {
+        pointer_y + offset as f64
+    } else {
+        pointer_y - offset as f64 - size as f64
+    };
+
+    let x = preferred_x
+        .round()
+        .clamp(0.0, width.saturating_sub(size) as f64) as u32;
+    let y = preferred_y
+        .round()
+        .clamp(0.0, height.saturating_sub(size) as f64) as u32;
+    Some((x, y, size, size))
+}
+
+fn capture_rect(
+    pointer: (f64, f64),
+    logical_size: u32,
+    logical_width: u32,
+    logical_height: u32,
+    source_width: u32,
+    source_height: u32,
+) -> Option<CaptureRect> {
+    if logical_size == 0
+        || logical_width == 0
+        || logical_height == 0
+        || source_width == 0
+        || source_height == 0
+        || !pointer.0.is_finite()
+        || !pointer.1.is_finite()
+    {
+        return None;
+    }
+
+    let scale_x = source_width as f64 / logical_width as f64;
+    let scale_y = source_height as f64 / logical_height as f64;
+    let pointer_x = pointer.0.clamp(0.0, logical_width.saturating_sub(1) as f64);
+    let pointer_y = pointer
+        .1
+        .clamp(0.0, logical_height.saturating_sub(1) as f64);
+
+    let width = (logical_size as f64 * scale_x)
+        .round()
+        .max(1.0)
+        .min(source_width as f64) as u32;
+    let height = (logical_size as f64 * scale_y)
+        .round()
+        .max(1.0)
+        .min(source_height as f64) as u32;
+    let max_x = (source_width - width) as f64;
+    let max_y = (source_height - height) as f64;
+    let x = (pointer_x * scale_x - width as f64 / 2.0)
+        .round()
+        .clamp(0.0, max_x) as u32;
+    let y = (pointer_y * scale_y - height as f64 / 2.0)
+        .round()
+        .clamp(0.0, max_y) as u32;
+
+    Some(CaptureRect {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+fn pixel_at(data: &[u8], width: u32, height: u32, x: u32, y: u32) -> Option<[u8; 4]> {
+    if x >= width || y >= height {
+        return None;
+    }
+    let index = (y as usize)
+        .checked_mul(width as usize)?
+        .checked_add(x as usize)?
+        .checked_mul(4)?;
+    let pixel = data.get(index..index.checked_add(4)?)?;
+    Some([pixel[0], pixel[1], pixel[2], pixel[3]])
+}
+
+struct ColorLabelLayout {
+    background: PixelRect,
+    text: (u32, u32),
+}
+
+fn color_badge_layout(
+    magnifier: PixelRect,
+    width: u32,
+    height: u32,
+    text: &str,
+) -> (PixelRect, ColorLabelLayout) {
+    const BLOCK_SIZE: u32 = 20;
+    const GAP: u32 = 4;
+    const PADDING: u32 = 4;
+    const TEXT_HEIGHT: u32 = 7;
+
+    let (magnifier_x, magnifier_y, _, magnifier_height) = magnifier;
+    let block_x = magnifier_x.min(width.saturating_sub(BLOCK_SIZE));
+    let below = magnifier_y
+        .saturating_add(magnifier_height)
+        .saturating_add(GAP);
+    let block_y = if below.saturating_add(BLOCK_SIZE) <= height {
+        below
+    } else {
+        magnifier_y.saturating_sub(GAP.saturating_add(BLOCK_SIZE))
+    };
+    let block_y = block_y.min(height.saturating_sub(BLOCK_SIZE));
+    let block = (block_x, block_y, BLOCK_SIZE, BLOCK_SIZE);
+
+    let label_width = text_width(text).saturating_add(PADDING * 2);
+    let label_height = TEXT_HEIGHT.saturating_add(PADDING * 2);
+    let right = block_x.saturating_add(BLOCK_SIZE).saturating_add(GAP);
+    let label_x = if right.saturating_add(label_width) <= width {
+        right
+    } else {
+        block_x.saturating_sub(GAP.saturating_add(label_width))
+    };
+    let label_x = label_x.min(width.saturating_sub(label_width));
+    let label_y = block_y
+        .saturating_add(BLOCK_SIZE.saturating_sub(label_height) / 2)
+        .min(height.saturating_sub(label_height));
+
+    (
+        block,
+        ColorLabelLayout {
+            background: (label_x, label_y, label_width, label_height),
+            text: (
+                label_x.saturating_add(PADDING),
+                label_y.saturating_add(PADDING),
+            ),
+        },
+    )
+}
+
+fn hex_color(color: [u8; 4]) -> String {
+    let [red, green, blue, alpha] = color;
+    if alpha == 255 {
+        format!("#{red:02X}{green:02X}{blue:02X}")
+    } else {
+        format!("#{red:02X}{green:02X}{blue:02X}{alpha:02X}")
+    }
 }
 
 impl CompositorHandler for SelectorState {
@@ -912,13 +1232,27 @@ impl PointerHandler for SelectorState {
             else {
                 continue;
             };
+            if matches!(&event.kind, PointerEventKind::Leave { .. }) {
+                if self.active_surface == Some(index) {
+                    self.active_surface = None;
+                    self.redraw(index, qh);
+                }
+                continue;
+            }
+            let previous_surface = self.active_surface;
             self.active_surface = Some(index);
             self.pointer_position = event.position;
+            if let Some(previous) = previous_surface
+                && previous != index
+            {
+                self.redraw(previous, qh);
+            }
             match event.kind {
                 PointerEventKind::Enter { .. } => {
                     if let Some(pointer) = &self.pointer {
                         let _ = pointer.set_cursor(connection, CursorIcon::Crosshair);
                     }
+                    self.redraw(index, qh);
                 }
                 PointerEventKind::Motion { .. } => {
                     if self.phase == Phase::Select && self.selection.dragging {
@@ -931,8 +1265,8 @@ impl PointerHandler for SelectorState {
                             current.1 = self.selection.anchor.1 + size.copysign(dy);
                         }
                         self.selection.current = current;
-                        self.redraw(index, qh);
                     }
+                    self.redraw(index, qh);
                 }
                 PointerEventKind::Press { button, .. } if button == LEFT_BUTTON => {
                     if self.phase == Phase::Scroll {
@@ -1022,6 +1356,7 @@ impl KeyboardHandler for SelectorState {
                 self.show_cursor = !self.show_cursor;
                 self.redraw_all(qh);
             }
+            Keysym::c | Keysym::C if self.magnifier => self.copy_color_at_pointer(),
             _ => {}
         }
     }
@@ -1562,6 +1897,31 @@ fn clear_rect(data: &mut [u8], width: u32, height: u32, rect: (u32, u32, u32, u3
     }
 }
 
+// 定位十字线
+fn draw_pos_line(
+    data: &mut [u8],
+    width: u32,
+    height: u32,
+    rect: (u32, u32, u32, u32), // 要画线的矩形
+    thickness: u32,             // 线的厚度
+    color: [u8; 4],
+) {
+    if rect.2 == 0 || rect.3 == 0 || thickness == 0 {
+        return;
+    }
+
+    // 横线
+    let hx: u32 = rect.0;
+    let hy: u32 = rect.1 + (rect.3 - thickness) / 2;
+
+    // 垂直线
+    let vx: u32 = rect.0 + (rect.2 - thickness) / 2;
+    let vy: u32 = rect.1;
+
+    fill_rect(data, width, height, (hx, hy, rect.2, thickness), color);
+    fill_rect(data, width, height, (vx, vy, thickness, rect.3), color);
+}
+
 fn draw_border_lines(
     data: &mut [u8],
     width: u32,
@@ -2036,6 +2396,7 @@ fn bold_text_width(text: &str) -> u32 {
 }
 fn glyph(ch: char) -> [u8; 7] {
     match ch {
+        '#' => [10, 31, 10, 10, 31, 10, 0],
         '0' => [14, 17, 19, 21, 25, 17, 14],
         '1' => [4, 12, 4, 4, 4, 4, 14],
         '2' => [14, 17, 1, 2, 4, 8, 31],
@@ -2047,9 +2408,11 @@ fn glyph(ch: char) -> [u8; 7] {
         '8' => [14, 17, 17, 14, 17, 17, 14],
         '9' => [14, 17, 17, 15, 1, 1, 14],
         'a' => [0, 14, 1, 15, 17, 19, 13],
+        'b' => [16, 16, 30, 17, 17, 17, 30],
         'c' => [0, 14, 17, 16, 16, 17, 14],
         'd' => [1, 1, 15, 17, 17, 19, 13],
         'e' => [0, 14, 17, 31, 16, 17, 14],
+        'f' => [6, 8, 8, 28, 8, 8, 8],
         'h' => [16, 16, 30, 17, 17, 17, 17],
         'i' => [4, 0, 12, 4, 4, 4, 14],
         'l' => [12, 4, 4, 4, 4, 4, 14],
@@ -2070,6 +2433,116 @@ fn glyph(ch: char) -> [u8; 7] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn magnifier_rect_is_clamped_to_the_output() {
+        for pointer in [
+            (-10.0, -10.0),
+            (0.0, 0.0),
+            (1919.0, 1079.0),
+            (5000.0, 5000.0),
+        ] {
+            let (x, y, width, height) = magnifier_rect(pointer, 1920, 1080, 64, 20).unwrap();
+            assert_eq!((width, height), (64, 64));
+            assert!(x + width <= 1920);
+            assert!(y + height <= 1080);
+        }
+    }
+
+    #[test]
+    fn magnifier_rect_is_skipped_on_outputs_smaller_than_the_loupe() {
+        assert_eq!(magnifier_rect((0.0, 0.0), 63, 1080, 64, 20), None);
+        assert_eq!(magnifier_rect((0.0, 0.0), 1920, 63, 64, 20), None);
+    }
+
+    #[test]
+    fn capture_rect_maps_logical_pointer_to_physical_source() {
+        assert_eq!(
+            capture_rect((100.0, 100.0), 32, 800, 600, 1600, 1200),
+            Some(CaptureRect {
+                x: 168,
+                y: 168,
+                width: 64,
+                height: 64,
+            })
+        );
+        assert_eq!(
+            capture_rect((100.0, 100.0), 32, 1024, 576, 1280, 720),
+            Some(CaptureRect {
+                x: 105,
+                y: 105,
+                width: 40,
+                height: 40,
+            })
+        );
+    }
+
+    #[test]
+    fn capture_rect_stays_inside_the_source_at_edges() {
+        assert_eq!(
+            capture_rect((0.0, 0.0), 32, 800, 600, 1600, 1200),
+            Some(CaptureRect {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            })
+        );
+        assert_eq!(
+            capture_rect((800.0, 600.0), 32, 800, 600, 1600, 1200),
+            Some(CaptureRect {
+                x: 1536,
+                y: 1136,
+                width: 64,
+                height: 64,
+            })
+        );
+    }
+
+    #[test]
+    fn pixel_sampling_rejects_out_of_bounds_coordinates() {
+        let mut data = vec![0; 2 * 2 * 4];
+        data[..4].copy_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(pixel_at(&data, 2, 2, 0, 0), Some([1, 2, 3, 4]));
+        assert_eq!(pixel_at(&data, 2, 2, 2, 0), None);
+        assert_eq!(pixel_at(&data, 2, 2, 0, 2), None);
+    }
+
+    #[test]
+    fn hex_color_uses_rgb_for_opaque_pixels() {
+        assert_eq!(hex_color([0x12, 0x34, 0x56, 255]), "#123456");
+        assert_eq!(hex_color([0x12, 0x34, 0x56, 0x78]), "#12345678");
+    }
+
+    #[test]
+    fn color_badge_stays_inside_the_output() {
+        for magnifier in [
+            (0, 0, 64, 64),
+            (1856, 0, 64, 64),
+            (0, 1016, 64, 64),
+            (1856, 1016, 64, 64),
+        ] {
+            let (block, label) = color_badge_layout(magnifier, 1920, 1080, "#12345678");
+            assert!(block.0 + block.2 <= 1920);
+            assert!(block.1 + block.3 <= 1080);
+            assert!(label.background.0 + label.background.2 <= 1920);
+            assert!(label.background.1 + label.background.3 <= 1080);
+        }
+        let (block, label) = color_badge_layout((0, 0, 64, 64), 100, 50, "#12345678");
+        assert!(block.0 + block.2 <= 100);
+        assert!(block.1 + block.3 <= 50);
+        assert!(label.background.0 + label.background.2 <= 100);
+        assert!(label.background.1 + label.background.3 <= 50);
+    }
+
+    #[test]
+    fn hex_label_glyphs_are_visible() {
+        for ch in "#0123456789ABCDEF".chars() {
+            let glyph = glyph(ch.to_ascii_lowercase());
+            assert!(glyph.iter().any(|row| *row != 0), "missing glyph for {ch}");
+        }
+    }
+
     #[test]
     fn selection_is_clamped_and_inclusive() {
         let selection = Selection {

@@ -71,7 +71,8 @@ dmsshot-rs --be kde window # force the KDE/KWin backend
 
 Run `dmsshot-rs --help` for image format, destination, cursor, JSON, and stdout options. Region mode
 uses Enter or Space to confirm, Escape to cancel, `P` to toggle the captured pointer, and Shift to
-constrain a drag to a square. Scroll mode finishes with Enter or the Done button. Successful file
+constrain a drag to a square. Pass `--magnifier` to show the cursor magnifier and enable color
+copying with `C`; it is off by default. Scroll mode finishes with Enter or the Done button. Successful file
 captures are copied and notified by default; use `--no-clipboard` or `--no-notify` to disable either
 integration. When niri is selected, the `window` command relies on niri's native
 `ScreenshotWindow` action, which always sets the clipboard as an inherent compositor side effect,

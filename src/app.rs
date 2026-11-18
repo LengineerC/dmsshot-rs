@@ -262,6 +262,7 @@ impl Application {
                 interval: Duration::from_millis(interval_ms),
                 initial: state::load_last_region(),
                 show_cursor: self.cli.cursor.enabled(),
+                magnifier: self.cli.magnifier,
                 theme_source: if self.cli.qt {
                     ThemeSource::Qt
                 } else {

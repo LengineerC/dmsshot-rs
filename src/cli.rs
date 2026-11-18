@@ -118,6 +118,10 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = CursorMode::Off, global = true)]
     pub cursor: CursorMode,
 
+    /// Show the cursor magnifier in interactive selectors and enable color copying with C.
+    #[arg(long, global = true)]
+    pub magnifier: bool,
+
     /// Image format.
     #[arg(short = 'f', long = "format", value_enum, default_value_t = OutputFormat::Png, global = true)]
     pub format: OutputFormat,
@@ -196,6 +200,15 @@ mod tests {
         let cli = Cli::try_parse_from(["dmsshot"]).unwrap();
         assert_eq!(cli.command(), Command::Region);
         assert_eq!(cli.format, OutputFormat::Png);
+        assert!(!cli.magnifier);
+    }
+
+    #[test]
+    fn magnifier_can_be_enabled_globally() {
+        let cli = Cli::try_parse_from(["dmsshot", "--magnifier", "region"]).unwrap();
+        assert!(cli.magnifier);
+        let cli = Cli::try_parse_from(["dmsshot", "ocr", "--magnifier"]).unwrap();
+        assert!(cli.magnifier);
     }
 
     #[test]
