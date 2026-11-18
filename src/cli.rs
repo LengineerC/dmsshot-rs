@@ -25,13 +25,6 @@ pub enum OutputFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ColorFormat {
-    Hex,
-    Rgb,
-    Hsl,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OcrEngine {
     Paddle,
     Tesseract,
@@ -135,10 +128,6 @@ pub struct Cli {
     #[arg(long = "zoom", value_name = "ZOOM", global = true, value_parser = clap::value_parser!(u8).range(1..=5))]
     pub magnifier_zoom: Option<u8>,
 
-    /// Color text used by the magnifier and C key (default hex).
-    #[arg(long, value_enum, global = true)]
-    pub color_format: Option<ColorFormat>,
-
     /// Image format.
     #[arg(short = 'f', long = "format", value_enum, default_value_t = OutputFormat::Png, global = true)]
     pub format: OutputFormat,
@@ -201,10 +190,6 @@ impl Cli {
         self.magnifier_zoom.unwrap_or(2)
     }
 
-    pub fn color_format(&self) -> ColorFormat {
-        self.color_format.unwrap_or(ColorFormat::Hex)
-    }
-
     pub fn validate(&self) -> std::result::Result<(), String> {
         let command = self.command();
         let interactive = matches!(
@@ -226,17 +211,9 @@ impl Cli {
             if self.magnifier_zoom.is_some() {
                 return Err("--zoom requires --magnifier or the magnifier subcommand".into());
             }
-            if self.color_format.is_some() {
-                return Err(
-                    "--color-format requires --magnifier or the magnifier subcommand".into(),
-                );
-            }
         } else if !self.magnifier {
             if self.magnifier_zoom.is_some() {
                 return Err("--zoom requires --magnifier".into());
-            }
-            if self.color_format.is_some() {
-                return Err("--color-format requires --magnifier".into());
             }
         }
         Ok(())
@@ -255,14 +232,13 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{BackendPreference, Cli, ColorFormat, Command, OutputFormat};
+    use super::{BackendPreference, Cli, Command, OutputFormat};
 
     #[test]
     fn defaults_to_region() {
         let cli = Cli::try_parse_from(["dmsshot"]).unwrap();
         assert_eq!(cli.command(), Command::Region);
         assert_eq!(cli.format, OutputFormat::Png);
-        assert_eq!(cli.color_format(), ColorFormat::Hex);
         assert_eq!(cli.zoom(), 2);
         assert!(!cli.magnifier);
         assert!(cli.validate().is_ok());
@@ -279,43 +255,14 @@ mod tests {
     }
 
     #[test]
-    fn color_format_requires_an_active_magnifier() {
-        let cli = Cli::try_parse_from(["dmsshot", "--color-format", "rgb", "--magnifier"]).unwrap();
-        assert_eq!(cli.color_format(), ColorFormat::Rgb);
-        assert!(cli.validate().is_ok());
-
-        let cli =
-            Cli::try_parse_from(["dmsshot", "region", "--magnifier", "--color-format", "hsl"])
-                .unwrap();
-        assert_eq!(cli.color_format(), ColorFormat::Hsl);
-        assert!(cli.validate().is_ok());
-
-        let cli = Cli::try_parse_from(["dmsshot", "--color-format", "rgb"]).unwrap();
-        assert!(cli.validate().is_err());
-        let cli = Cli::try_parse_from(["dmsshot", "--color-format", "hex", "region"]).unwrap();
-        assert!(cli.validate().is_err());
-        assert!(Cli::try_parse_from(["dmsshot", "--magnifier", "--color-format", "cmyk"]).is_err());
-    }
-
-    #[test]
-    fn magnifier_subcommand_uses_zoom_and_color_format() {
+    fn magnifier_subcommand_uses_zoom() {
         let cli = Cli::try_parse_from(["dmsshot", "magnifier"]).unwrap();
         assert_eq!(cli.command(), Command::Magnifier);
         assert_eq!(cli.zoom(), 2);
-        assert_eq!(cli.color_format(), ColorFormat::Hex);
         assert!(cli.validate().is_ok());
 
-        let cli = Cli::try_parse_from([
-            "dmsshot",
-            "magnifier",
-            "--zoom",
-            "5",
-            "--color-format",
-            "hsl",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["dmsshot", "magnifier", "--zoom", "5"]).unwrap();
         assert_eq!(cli.zoom(), 5);
-        assert_eq!(cli.color_format(), ColorFormat::Hsl);
         assert!(cli.validate().is_ok());
 
         assert!(Cli::try_parse_from(["dmsshot", "magnifier", "--zoom", "0"]).is_err());
@@ -333,8 +280,6 @@ mod tests {
         }
 
         let cli = Cli::try_parse_from(["dmsshot", "region", "--zoom", "3"]).unwrap();
-        assert!(cli.validate().is_err());
-        let cli = Cli::try_parse_from(["dmsshot", "region", "--color-format", "hsl"]).unwrap();
         assert!(cli.validate().is_err());
     }
 

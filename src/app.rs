@@ -192,7 +192,6 @@ impl Application {
                 show_cursor: self.cli.cursor.enabled(),
                 magnifier: true,
                 zoom: self.cli.zoom(),
-                color_format: self.cli.color_format(),
                 theme_source: if self.cli.qt {
                     ThemeSource::Qt
                 } else {
@@ -308,7 +307,6 @@ impl Application {
                 show_cursor: self.cli.cursor.enabled(),
                 magnifier: self.cli.magnifier,
                 zoom: self.cli.zoom(),
-                color_format: self.cli.color_format(),
                 theme_source: if self.cli.qt {
                     ThemeSource::Qt
                 } else {
