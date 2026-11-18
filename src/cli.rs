@@ -25,6 +25,13 @@ pub enum OutputFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ColorFormat {
+    Hex,
+    Rgb,
+    Hsl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OcrEngine {
     Paddle,
     Tesseract,
@@ -122,6 +129,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub magnifier: bool,
 
+    /// Color text used by the magnifier and C key.
+    #[arg(long, value_enum, default_value_t = ColorFormat::Hex, requires = "magnifier", global = true)]
+    pub color_format: ColorFormat,
+
     /// Image format.
     #[arg(short = 'f', long = "format", value_enum, default_value_t = OutputFormat::Png, global = true)]
     pub format: OutputFormat,
@@ -193,13 +204,14 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{BackendPreference, Cli, Command, OutputFormat};
+    use super::{BackendPreference, Cli, ColorFormat, Command, OutputFormat};
 
     #[test]
     fn defaults_to_region() {
         let cli = Cli::try_parse_from(["dmsshot"]).unwrap();
         assert_eq!(cli.command(), Command::Region);
         assert_eq!(cli.format, OutputFormat::Png);
+        assert_eq!(cli.color_format, ColorFormat::Hex);
         assert!(!cli.magnifier);
     }
 
@@ -209,6 +221,21 @@ mod tests {
         assert!(cli.magnifier);
         let cli = Cli::try_parse_from(["dmsshot", "ocr", "--magnifier"]).unwrap();
         assert!(cli.magnifier);
+    }
+
+    #[test]
+    fn color_format_is_global_and_requires_the_magnifier() {
+        let cli = Cli::try_parse_from(["dmsshot", "--color-format", "rgb", "--magnifier"]).unwrap();
+        assert_eq!(cli.color_format, ColorFormat::Rgb);
+
+        let cli =
+            Cli::try_parse_from(["dmsshot", "region", "--magnifier", "--color-format", "hsl"])
+                .unwrap();
+        assert_eq!(cli.color_format, ColorFormat::Hsl);
+
+        assert!(Cli::try_parse_from(["dmsshot", "--color-format", "rgb"]).is_err());
+        assert!(Cli::try_parse_from(["dmsshot", "--color-format", "hex", "region"]).is_err());
+        assert!(Cli::try_parse_from(["dmsshot", "--magnifier", "--color-format", "cmyk"]).is_err());
     }
 
     #[test]

@@ -263,6 +263,7 @@ impl Application {
                 initial: state::load_last_region(),
                 show_cursor: self.cli.cursor.enabled(),
                 magnifier: self.cli.magnifier,
+                color_format: self.cli.color_format,
                 theme_source: if self.cli.qt {
                     ThemeSource::Qt
                 } else {
