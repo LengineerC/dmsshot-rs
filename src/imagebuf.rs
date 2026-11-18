@@ -105,15 +105,24 @@ impl ImageBuffer {
             for x in 0..width as usize {
                 let si = src_row + x * bytes_per_pixel as usize;
                 let di = dst_row + x * 4;
-                let (r, g, b) = match format {
-                    WL_SHM_ABGR8888 | WL_SHM_XBGR8888 => {
-                        (source[si], source[si + 1], source[si + 2])
+                let (r, g, b, alpha) = match format {
+                    WL_SHM_ABGR8888 => (source[si], source[si + 1], source[si + 2], source[si + 3]),
+                    WL_SHM_XBGR8888 => (source[si], source[si + 1], source[si + 2], 255),
+                    WL_SHM_RGB888 | WL_SHM_XRGB8888 => {
+                        (source[si + 2], source[si + 1], source[si], 255)
                     }
-                    WL_SHM_RGB888 | WL_SHM_ARGB8888 | WL_SHM_XRGB8888 => {
-                        (source[si + 2], source[si + 1], source[si])
-                    }
-                    WL_SHM_BGR888 => (source[si], source[si + 1], source[si + 2]),
+                    WL_SHM_ARGB8888 => (source[si + 2], source[si + 1], source[si], source[si + 3]),
+                    WL_SHM_BGR888 => (source[si], source[si + 1], source[si + 2], 255),
                     _ => unreachable!(),
+                };
+                let (r, g, b) = if alpha == 0 || alpha == 255 {
+                    (r, g, b)
+                } else {
+                    (
+                        unpremultiply(r, alpha),
+                        unpremultiply(g, alpha),
+                        unpremultiply(b, alpha),
+                    )
                 };
                 image.pixels[di..di + 4].copy_from_slice(&[r, g, b, 255]);
             }
@@ -266,6 +275,10 @@ fn byte_len(width: u32, height: u32) -> Result<usize> {
         .ok_or(Error::ImageTooLarge)
 }
 
+fn unpremultiply(value: u8, alpha: u8) -> u8 {
+    ((value as u16 * 255 + alpha as u16 / 2) / alpha as u16).min(255) as u8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +291,17 @@ mod tests {
         let image = ImageBuffer::from_wayland(2, 2, 12, WL_SHM_XRGB8888, &source, true).unwrap();
         assert_eq!(&image.pixels[..8], &[9, 8, 7, 255, 12, 11, 10, 255]);
         assert_eq!(&image.pixels[8..], &[3, 2, 1, 255, 6, 5, 4, 255]);
+    }
+
+    #[test]
+    fn unpremultiplies_argb_and_abgr_before_discarding_alpha() {
+        let argb = [16, 32, 64, 128];
+        let image = ImageBuffer::from_wayland(1, 1, 4, WL_SHM_ARGB8888, &argb, false).unwrap();
+        assert_eq!(image.pixels, vec![128, 64, 32, 255]);
+
+        let abgr = [64, 32, 16, 128];
+        let image = ImageBuffer::from_wayland(1, 1, 4, WL_SHM_ABGR8888, &abgr, false).unwrap();
+        assert_eq!(image.pixels, vec![128, 64, 32, 255]);
     }
 
     #[test]

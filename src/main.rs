@@ -21,6 +21,10 @@ use crate::{
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Err(message) = cli.validate() {
+        eprintln!("error: {message}");
+        return ExitCode::from(2);
+    }
     if let Some(Command::NotificationAction { path, copied }) = cli.command.as_ref() {
         integration::run_notification_listener(path, *copied);
         return ExitCode::SUCCESS;

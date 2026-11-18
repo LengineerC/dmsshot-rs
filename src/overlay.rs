@@ -46,6 +46,7 @@ use wayland_protocols::wp::viewporter::client::{
 
 use crate::{
     backend::{CaptureSource, OutputInfo},
+    cli::ColorFormat,
     error::{Error, Result},
     imagebuf::{ImageBuffer, Region},
     integration,
@@ -54,6 +55,9 @@ use crate::{
 
 const LEFT_BUTTON: u32 = 0x110;
 const SCROLL_SEAM_TICKS: u8 = 4;
+const LOUPE_SIZE: u32 = 60;
+const LOUPE_OFFSET: u32 = 20;
+const LOUPE_RADIUS: u32 = 10;
 type PixelRect = (u32, u32, u32, u32);
 
 pub struct Background {
@@ -63,13 +67,22 @@ pub struct Background {
 }
 
 pub struct SelectorOptions {
+    pub mode: SelectorMode,
     pub no_confirm: bool,
     pub scroll: bool,
     pub interval: Duration,
     pub initial: Region,
     pub show_cursor: bool,
     pub magnifier: bool,
+    pub zoom: u8,
+    pub color_format: ColorFormat,
     pub theme_source: ThemeSource,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SelectorMode {
+    Screenshot,
+    Magnifier,
 }
 
 #[derive(Clone, Copy)]
@@ -114,6 +127,7 @@ struct Selection {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Select,
+    Magnifier,
     Scroll,
 }
 
@@ -150,11 +164,13 @@ struct SelectorState {
     _viewporter: WpViewporter,
     active_surface: Option<usize>,
     pointer_position: (f64, f64),
-    pointer_color: [u8; 4],
+    pointer_color_text: String,
     selection: Selection,
     shift: bool,
     show_cursor: bool,
     magnifier: bool,
+    zoom: u8,
+    color_format: ColorFormat,
     no_confirm: bool,
     phase: Phase,
     scroll: Option<ScrollState>,
@@ -206,15 +222,20 @@ pub fn select_region(
         _viewporter: viewporter.clone(),
         active_surface: None,
         pointer_position: (0.0, 0.0),
-        pointer_color: [0, 0, 0, 255],
+        pointer_color_text: format_color([0, 0, 0, 255], options.color_format, false),
         selection: Selection::default(),
         shift: false,
         show_cursor: options.show_cursor,
-        magnifier: options.magnifier,
+        magnifier: options.magnifier || options.mode == SelectorMode::Magnifier,
+        zoom: options.zoom.clamp(1, 5),
+        color_format: options.color_format,
         no_confirm: options.no_confirm,
-        phase: Phase::Select,
+        phase: match options.mode {
+            SelectorMode::Screenshot => Phase::Select,
+            SelectorMode::Magnifier => Phase::Magnifier,
+        },
         scroll: None,
-        scroll_requested: options.scroll,
+        scroll_requested: options.scroll && options.mode == SelectorMode::Screenshot,
         interval: options.interval,
         running: true,
         cancelled: false,
@@ -270,7 +291,9 @@ pub fn select_region(
         });
     }
     state.install_shortcut_inhibitors(&qh);
-    state.apply_initial(options.initial);
+    if options.mode == SelectorMode::Screenshot {
+        state.apply_initial(options.initial);
+    }
 
     let mut event_loop: EventLoop<SelectorState> =
         EventLoop::try_new().map_err(|err| Error::Wayland(format!("event loop: {err}")))?;
@@ -408,96 +431,128 @@ impl SelectorState {
     }
 
     fn render(&mut self, index: usize, width: u32, height: u32) -> Vec<u8> {
-        if self.phase == Phase::Select {
-            // 选择阶段
-            let rect = (self.selection.present && self.selection.surface == Some(index))
-                .then(|| selection_rect(&self.selection, width, height));
-            let show_cursor = self.show_cursor;
-            let mut rgba = {
-                let surface = &mut self.surfaces[index];
-                let preview = if show_cursor {
-                    prepare_preview(
-                        &surface.with_cursor,
-                        &mut surface.with_cursor_preview,
-                        width,
-                        height,
-                    )
-                } else {
-                    prepare_preview(
-                        &surface.without_cursor,
-                        &mut surface.without_cursor_preview,
-                        width,
-                        height,
-                    )
-                };
-                let mut rgba = std::mem::take(&mut surface.render_buffer);
-                rgba.clone_from(&preview.dimmed);
-                if let Some(rect) = rect {
-                    let row_bytes = rect.2 as usize * 4;
-                    for y in rect.1..rect.1 + rect.3 {
-                        let start = (y as usize * width as usize + rect.0 as usize) * 4;
-                        let end = start + row_bytes;
-                        rgba[start..end].copy_from_slice(&preview.normal[start..end]);
+        match self.phase {
+            Phase::Select => {
+                // 选择阶段
+                let rect = (self.selection.present && self.selection.surface == Some(index))
+                    .then(|| selection_rect(&self.selection, width, height));
+                let show_cursor = self.show_cursor;
+                let mut rgba = {
+                    let surface = &mut self.surfaces[index];
+                    let preview = if show_cursor {
+                        prepare_preview(
+                            &surface.with_cursor,
+                            &mut surface.with_cursor_preview,
+                            width,
+                            height,
+                        )
+                    } else {
+                        prepare_preview(
+                            &surface.without_cursor,
+                            &mut surface.without_cursor_preview,
+                            width,
+                            height,
+                        )
+                    };
+                    let mut rgba = std::mem::take(&mut surface.render_buffer);
+                    rgba.clone_from(&preview.dimmed);
+                    if let Some(rect) = rect {
+                        let row_bytes = rect.2 as usize * 4;
+                        for y in rect.1..rect.1 + rect.3 {
+                            let start = (y as usize * width as usize + rect.0 as usize) * 4;
+                            let end = start + row_bytes;
+                            rgba[start..end].copy_from_slice(&preview.normal[start..end]);
+                        }
                     }
-                }
-                rgba
-            };
-            if let Some(rect) = rect {
-                draw_selection_border(&mut rgba, width, height, rect, self.theme);
-                draw_label(
-                    &mut rgba,
-                    width,
-                    height,
-                    rect,
-                    &format!("{}x{}", rect.2, rect.3),
-                    self.theme,
-                );
-            }
-            if !self.selection.dragging {
-                draw_hud(
-                    &mut rgba,
-                    width,
-                    height,
-                    self.show_cursor,
-                    self.no_confirm,
-                    self.theme,
-                );
-            }
-            // 放大镜只属于指针当前所在的输出，避免用一块屏幕的坐标渲染另一块屏幕。
-            if self.magnifier && self.active_surface == Some(index) {
-                self.draw_follow_mouse_rect(&mut rgba, width, height, index);
-            }
-            rgba
-        } else {
-            let mut rgba = std::mem::take(&mut self.surfaces[index].render_buffer);
-            rgba.resize(width as usize * height as usize * 4, 0);
-            for pixel in rgba.chunks_exact_mut(4) {
-                pixel.copy_from_slice(&[0, 0, 0, 102]);
-            }
-            if let Some(scroll) = &self.scroll
-                && self.selection.surface == Some(index)
-            {
-                let rect = (
-                    scroll.local_region.x.max(0) as u32,
-                    scroll.local_region.y.max(0) as u32,
-                    scroll.local_region.width.max(1) as u32,
-                    scroll.local_region.height.max(1) as u32,
-                );
-                clear_rect(&mut rgba, width, height, rect);
-                draw_outside_border(&mut rgba, width, height, rect, self.theme.accent);
-                if let Some(bar) = scroll.bar {
-                    draw_scroll_bar(
+                    rgba
+                };
+                if let Some(rect) = rect {
+                    draw_selection_border(&mut rgba, width, height, rect, self.theme);
+                    draw_label(
                         &mut rgba,
                         width,
                         height,
-                        bar,
-                        scroll.kept,
-                        scroll.stitcher.as_ref().map_or(0, Stitcher::rows),
+                        rect,
+                        &format!("{}x{}", rect.2, rect.3),
                         self.theme,
                     );
                 }
+                if !self.selection.dragging {
+                    draw_hud(
+                        &mut rgba,
+                        width,
+                        height,
+                        self.show_cursor,
+                        self.no_confirm,
+                        self.theme,
+                    );
+                }
+                // 放大镜只属于指针当前所在的输出，避免用一块屏幕的坐标渲染另一块屏幕。
+                if self.magnifier && self.active_surface == Some(index) {
+                    self.draw_follow_mouse_rect(&mut rgba, width, height, index);
+                }
+                rgba
             }
-            rgba
+            Phase::Magnifier => {
+                let show_cursor = self.show_cursor;
+                let mut rgba = {
+                    let surface = &mut self.surfaces[index];
+                    let preview = if show_cursor {
+                        prepare_preview(
+                            &surface.with_cursor,
+                            &mut surface.with_cursor_preview,
+                            width,
+                            height,
+                        )
+                    } else {
+                        prepare_preview(
+                            &surface.without_cursor,
+                            &mut surface.without_cursor_preview,
+                            width,
+                            height,
+                        )
+                    };
+                    let mut rgba = std::mem::take(&mut surface.render_buffer);
+                    rgba.clone_from(&preview.normal);
+                    rgba
+                };
+                draw_magnifier_hud(&mut rgba, width, height, self.theme);
+                if self.active_surface == Some(index) {
+                    self.draw_follow_mouse_rect(&mut rgba, width, height, index);
+                }
+                rgba
+            }
+            Phase::Scroll => {
+                let mut rgba = std::mem::take(&mut self.surfaces[index].render_buffer);
+                rgba.resize(width as usize * height as usize * 4, 0);
+                for pixel in rgba.chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&[0, 0, 0, 102]);
+                }
+                if let Some(scroll) = &self.scroll
+                    && self.selection.surface == Some(index)
+                {
+                    let rect = (
+                        scroll.local_region.x.max(0) as u32,
+                        scroll.local_region.y.max(0) as u32,
+                        scroll.local_region.width.max(1) as u32,
+                        scroll.local_region.height.max(1) as u32,
+                    );
+                    clear_rect(&mut rgba, width, height, rect);
+                    draw_outside_border(&mut rgba, width, height, rect, self.theme.accent);
+                    if let Some(bar) = scroll.bar {
+                        draw_scroll_bar(
+                            &mut rgba,
+                            width,
+                            height,
+                            bar,
+                            scroll.kept,
+                            scroll.stitcher.as_ref().map_or(0, Stitcher::rows),
+                            self.theme,
+                        );
+                    }
+                }
+                rgba
+            }
         }
     }
 
@@ -774,9 +829,9 @@ impl SelectorState {
         if !self.magnifier || self.active_surface != Some(index) {
             return;
         }
-        let size: u32 = 64;
-        let offset: u32 = 20;
-        let radius: u32 = 10;
+        let size = LOUPE_SIZE;
+        let offset = LOUPE_OFFSET;
+        let radius = LOUPE_RADIUS;
         let Some(rect) = magnifier_rect(self.pointer_position, width, height, size, offset) else {
             return;
         };
@@ -790,12 +845,15 @@ impl SelectorState {
             .pointer_position
             .1
             .clamp(0.0, height.saturating_sub(1) as f64) as u32;
-        let Some(mouse_pixel) = pixel_at(data, width, height, pointer_x, pointer_y) else {
+        let Some(pixel) = self
+            .source_pixel_at(index, pointer_x, pointer_y)
+            .or_else(|| pixel_at(data, width, height, pointer_x, pointer_y))
+        else {
             return;
         };
-        self.pointer_color = mouse_pixel;
-
-        if let Some(captured) = self.capture_around_mouse(index, size / 2) {
+        let mouse_pixel = [pixel[0], pixel[1], pixel[2], 255];
+        let source_size = magnifier_source_size(size, self.zoom);
+        if let Some(captured) = self.capture_around_mouse(index, source_size) {
             let src_w: usize = captured.width as usize;
             let src_h: usize = captured.height as usize;
             let scale_x: f32 = size as f32 / src_w as f32;
@@ -845,7 +903,13 @@ impl SelectorState {
         } else {
             fill_rounded_rect(data, width, height, rect, 5, self.theme.accent);
         }
-        let color_text = hex_color(mouse_pixel);
+        let full_text = format_color(mouse_pixel, self.color_format, false);
+        let color_text = if color_badge_fits(rect, width, &full_text) {
+            full_text
+        } else {
+            format_color(mouse_pixel, self.color_format, true)
+        };
+        self.pointer_color_text.clone_from(&color_text);
         let (color_block, label) = color_badge_layout(rect, width, height, &color_text);
 
         fill_rounded_rect(data, width, height, color_block, 5, mouse_pixel);
@@ -885,20 +949,46 @@ impl SelectorState {
             source.width,
             source.height,
         )?;
-        source
+        let mut image = source
             .crop(
                 rect.x as i32,
                 rect.y as i32,
                 rect.width as i32,
                 rect.height as i32,
             )
-            .ok()
+            .ok()?;
+        for pixel in image.pixels.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        Some(image)
+    }
+
+    fn source_pixel_at(&self, index: usize, x: u32, y: u32) -> Option<[u8; 4]> {
+        let surface = self.surfaces.get(index)?;
+        let source = if self.show_cursor {
+            &surface.with_cursor
+        } else {
+            &surface.without_cursor
+        };
+        let (source_x, source_y) = map_pointer_to_source(
+            x,
+            y,
+            surface.logical_width,
+            surface.logical_height,
+            source.width,
+            source.height,
+        )?;
+        pixel_at(
+            &source.pixels,
+            source.width,
+            source.height,
+            source_x,
+            source_y,
+        )
     }
 
     fn copy_color_at_pointer(&self) {
-        let mouse_pixel = self.pointer_color;
-        let color_string = hex_color(mouse_pixel);
-        if let Err(err) = integration::copy_text(&color_string) {
+        if let Err(err) = integration::copy_text(&self.pointer_color_text) {
             eprintln!("Failed to copy color: {err}");
         }
     }
@@ -953,6 +1043,10 @@ fn magnifier_rect(
     Some((x, y, size, size))
 }
 
+fn magnifier_source_size(size: u32, zoom: u8) -> u32 {
+    (size / u32::from(zoom.clamp(1, 5))).max(1)
+}
+
 fn capture_rect(
     pointer: (f64, f64),
     logical_size: u32,
@@ -1004,6 +1098,27 @@ fn capture_rect(
     })
 }
 
+fn map_pointer_to_source(
+    x: u32,
+    y: u32,
+    logical_width: u32,
+    logical_height: u32,
+    source_width: u32,
+    source_height: u32,
+) -> Option<(u32, u32)> {
+    if logical_width == 0 || logical_height == 0 || source_width == 0 || source_height == 0 {
+        return None;
+    }
+    let source_x =
+        (x.min(logical_width - 1) as u64 * source_width as u64 / logical_width as u64) as u32;
+    let source_y =
+        (y.min(logical_height - 1) as u64 * source_height as u64 / logical_height as u64) as u32;
+    Some((
+        source_x.min(source_width - 1),
+        source_y.min(source_height - 1),
+    ))
+}
+
 fn pixel_at(data: &[u8], width: u32, height: u32, x: u32, y: u32) -> Option<[u8; 4]> {
     if x >= width || y >= height {
         return None;
@@ -1021,41 +1136,43 @@ struct ColorLabelLayout {
     text: (u32, u32),
 }
 
+const COLOR_BLOCK_SIZE: u32 = 20;
+const COLOR_BADGE_GAP: u32 = 4;
+const COLOR_BADGE_PADDING: u32 = 4;
+const COLOR_TEXT_HEIGHT: u32 = 7;
+
 fn color_badge_layout(
     magnifier: PixelRect,
     width: u32,
     height: u32,
     text: &str,
 ) -> (PixelRect, ColorLabelLayout) {
-    const BLOCK_SIZE: u32 = 20;
-    const GAP: u32 = 4;
-    const PADDING: u32 = 4;
-    const TEXT_HEIGHT: u32 = 7;
-
     let (magnifier_x, magnifier_y, _, magnifier_height) = magnifier;
-    let block_x = magnifier_x.min(width.saturating_sub(BLOCK_SIZE));
+    let block_x = magnifier_x.min(width.saturating_sub(COLOR_BLOCK_SIZE));
     let below = magnifier_y
         .saturating_add(magnifier_height)
-        .saturating_add(GAP);
-    let block_y = if below.saturating_add(BLOCK_SIZE) <= height {
+        .saturating_add(COLOR_BADGE_GAP);
+    let block_y = if below.saturating_add(COLOR_BLOCK_SIZE) <= height {
         below
     } else {
-        magnifier_y.saturating_sub(GAP.saturating_add(BLOCK_SIZE))
+        magnifier_y.saturating_sub(COLOR_BADGE_GAP.saturating_add(COLOR_BLOCK_SIZE))
     };
-    let block_y = block_y.min(height.saturating_sub(BLOCK_SIZE));
-    let block = (block_x, block_y, BLOCK_SIZE, BLOCK_SIZE);
+    let block_y = block_y.min(height.saturating_sub(COLOR_BLOCK_SIZE));
+    let block = (block_x, block_y, COLOR_BLOCK_SIZE, COLOR_BLOCK_SIZE);
 
-    let label_width = text_width(text).saturating_add(PADDING * 2);
-    let label_height = TEXT_HEIGHT.saturating_add(PADDING * 2);
-    let right = block_x.saturating_add(BLOCK_SIZE).saturating_add(GAP);
+    let label_width = color_label_width(text);
+    let label_height = COLOR_TEXT_HEIGHT.saturating_add(COLOR_BADGE_PADDING * 2);
+    let right = block_x
+        .saturating_add(COLOR_BLOCK_SIZE)
+        .saturating_add(COLOR_BADGE_GAP);
     let label_x = if right.saturating_add(label_width) <= width {
         right
     } else {
-        block_x.saturating_sub(GAP.saturating_add(label_width))
+        block_x.saturating_sub(COLOR_BADGE_GAP.saturating_add(label_width))
     };
     let label_x = label_x.min(width.saturating_sub(label_width));
     let label_y = block_y
-        .saturating_add(BLOCK_SIZE.saturating_sub(label_height) / 2)
+        .saturating_add(COLOR_BLOCK_SIZE.saturating_sub(label_height) / 2)
         .min(height.saturating_sub(label_height));
 
     (
@@ -1063,20 +1180,90 @@ fn color_badge_layout(
         ColorLabelLayout {
             background: (label_x, label_y, label_width, label_height),
             text: (
-                label_x.saturating_add(PADDING),
-                label_y.saturating_add(PADDING),
+                label_x.saturating_add(COLOR_BADGE_PADDING),
+                label_y.saturating_add(COLOR_BADGE_PADDING),
             ),
         },
     )
 }
 
-fn hex_color(color: [u8; 4]) -> String {
-    let [red, green, blue, alpha] = color;
-    if alpha == 255 {
-        format!("#{red:02X}{green:02X}{blue:02X}")
-    } else {
-        format!("#{red:02X}{green:02X}{blue:02X}{alpha:02X}")
+fn color_label_width(text: &str) -> u32 {
+    text_width(text).saturating_add(COLOR_BADGE_PADDING * 2)
+}
+
+fn color_badge_fits(magnifier: PixelRect, width: u32, text: &str) -> bool {
+    let (magnifier_x, _, _, _) = magnifier;
+    let block_x = magnifier_x.min(width.saturating_sub(COLOR_BLOCK_SIZE));
+    let label_width = color_label_width(text);
+    let right = block_x
+        .saturating_add(COLOR_BLOCK_SIZE)
+        .saturating_add(COLOR_BADGE_GAP);
+    let fits_right = right.saturating_add(label_width) <= width;
+    let fits_left = block_x >= COLOR_BADGE_GAP.saturating_add(label_width);
+    fits_right || fits_left
+}
+
+fn format_color(color: [u8; 4], format: ColorFormat, compact: bool) -> String {
+    match format {
+        ColorFormat::Hex => hex_color(color),
+        ColorFormat::Rgb => rgb_color(color, compact),
+        ColorFormat::Hsl => hsl_color(color, compact),
     }
+}
+
+fn rgb_color(color: [u8; 4], compact: bool) -> String {
+    let [red, green, blue, _] = color;
+    if compact {
+        format!("rgb({red},{green},{blue})")
+    } else {
+        format!("rgb({red}, {green}, {blue})")
+    }
+}
+
+fn hsl_color(color: [u8; 4], compact: bool) -> String {
+    let [red, green, blue, _] = color;
+    let (hue, saturation, lightness) = rgb_to_hsl([red, green, blue]);
+    if compact {
+        format!("hsl({hue:.2},{saturation:.2}%,{lightness:.2}%)")
+    } else {
+        format!("hsl({hue:.2}, {saturation:.2}%, {lightness:.2}%)")
+    }
+}
+
+fn rgb_to_hsl([red, green, blue]: [u8; 3]) -> (f64, f64, f64) {
+    let red = red as f64 / 255.0;
+    let green = green as f64 / 255.0;
+    let blue = blue as f64 / 255.0;
+
+    let max = red.max(green).max(blue);
+    let min = red.min(green).min(blue);
+    let delta = max - min;
+    let lightness = (max + min) / 2.0;
+
+    if delta == 0.0 {
+        return (0.0, 0.0, lightness * 100.0);
+    }
+
+    let saturation = if lightness > 0.5 {
+        delta / (2.0 - max - min)
+    } else {
+        delta / (max + min)
+    };
+    let hue = if max == red {
+        ((green - blue) / delta).rem_euclid(6.0)
+    } else if max == green {
+        (blue - red) / delta + 2.0
+    } else {
+        (red - green) / delta + 4.0
+    };
+    let hue = (hue * 60.0).rem_euclid(360.0);
+
+    (hue, saturation * 100.0, lightness * 100.0)
+}
+
+fn hex_color(color: [u8; 4]) -> String {
+    let [red, green, blue, _] = color;
+    format!("#{red:02X}{green:02X}{blue:02X}")
 }
 
 impl CompositorHandler for SelectorState {
@@ -1269,27 +1456,31 @@ impl PointerHandler for SelectorState {
                     self.redraw(index, qh);
                 }
                 PointerEventKind::Press { button, .. } if button == LEFT_BUTTON => {
-                    if self.phase == Phase::Scroll {
-                        let hit = self
-                            .scroll
-                            .as_ref()
-                            .and_then(|scroll| scroll.bar)
-                            .map_or(0, |bar| scroll_bar_hit(bar, event.position));
-                        if hit == 1 {
-                            self.finish_scroll();
-                        } else if hit == 2 {
-                            self.cancelled = true;
-                            self.running = false;
+                    match self.phase {
+                        Phase::Scroll => {
+                            let hit = self
+                                .scroll
+                                .as_ref()
+                                .and_then(|scroll| scroll.bar)
+                                .map_or(0, |bar| scroll_bar_hit(bar, event.position));
+                            if hit == 1 {
+                                self.finish_scroll();
+                            } else if hit == 2 {
+                                self.cancelled = true;
+                                self.running = false;
+                            }
                         }
-                    } else {
-                        self.selection = Selection {
-                            surface: Some(index),
-                            anchor: event.position,
-                            current: event.position,
-                            dragging: true,
-                            present: true,
-                        };
-                        self.redraw_all(qh);
+                        Phase::Select => {
+                            self.selection = Selection {
+                                surface: Some(index),
+                                anchor: event.position,
+                                current: event.position,
+                                dragging: true,
+                                present: true,
+                            };
+                            self.redraw_all(qh);
+                        }
+                        Phase::Magnifier => {}
                     }
                 }
                 PointerEventKind::Release { button, .. }
@@ -1450,6 +1641,9 @@ fn prepare_preview<'a>(
                 normal[target_index..target_index + 4]
                     .copy_from_slice(&source.pixels[source_index..source_index + 4]);
             }
+        }
+        for pixel in normal.chunks_exact_mut(4) {
+            pixel[3] = 255;
         }
         let mut dimmed = normal.clone();
         for pixel in dimmed.chunks_exact_mut(4) {
@@ -2129,6 +2323,26 @@ fn draw_hud(
     }
 }
 
+fn draw_magnifier_hud(data: &mut [u8], width: u32, height: u32, theme: Theme) {
+    let items = [("c", "copy"), ("esc", "exit")];
+    let content_width = items
+        .iter()
+        .map(|(key, desc)| bold_text_width(key) + 6 + text_width(desc))
+        .sum::<u32>()
+        + (items.len() as u32 - 1) * 18;
+    let bar_width = (content_width + 24).min(width);
+    let x = (width - bar_width) / 2;
+    let y = height.saturating_sub(34);
+    draw_hint_bar_background(data, width, height, (x, y, bar_width, 24), theme);
+    let mut text_x = x + 12;
+    for (index, (key, desc)) in items.into_iter().enumerate() {
+        text_x = draw_hint_item(data, width, height, text_x, y + 8, key, desc, theme);
+        if index + 1 < items.len() {
+            text_x += 18;
+        }
+    }
+}
+
 fn scroll_bar_geometry(width: u32, height: u32, avoid: PixelRect) -> Option<PixelRect> {
     if width == 0 || height == 0 {
         return None;
@@ -2413,6 +2627,7 @@ fn glyph(ch: char) -> [u8; 7] {
         'd' => [1, 1, 15, 17, 17, 19, 13],
         'e' => [0, 14, 17, 31, 16, 17, 14],
         'f' => [6, 8, 8, 28, 8, 8, 8],
+        'g' => [0, 14, 17, 17, 15, 1, 14],
         'h' => [16, 16, 30, 17, 17, 17, 17],
         'i' => [4, 0, 12, 4, 4, 4, 14],
         'l' => [12, 4, 4, 4, 4, 4, 14],
@@ -2425,6 +2640,12 @@ fn glyph(ch: char) -> [u8; 7] {
         'u' => [0, 17, 17, 17, 17, 19, 13],
         'w' => [0, 17, 17, 21, 21, 21, 10],
         'x' => [0, 17, 10, 4, 10, 17, 0],
+        'y' => [0, 17, 17, 17, 15, 1, 14],
+        '(' => [2, 4, 8, 8, 8, 4, 2],
+        ')' => [8, 4, 2, 2, 2, 4, 8],
+        ',' => [0, 0, 0, 0, 0, 4, 8],
+        '%' => [25, 26, 4, 8, 22, 6, 0],
+        '.' => [0, 0, 0, 0, 0, 12, 12],
         ' ' => [0; 7],
         _ => [0; 7],
     }
@@ -2453,6 +2674,15 @@ mod tests {
     fn magnifier_rect_is_skipped_on_outputs_smaller_than_the_loupe() {
         assert_eq!(magnifier_rect((0.0, 0.0), 63, 1080, 64, 20), None);
         assert_eq!(magnifier_rect((0.0, 0.0), 1920, 63, 64, 20), None);
+    }
+
+    #[test]
+    fn magnifier_zoom_maps_to_integer_source_pixels() {
+        assert_eq!(magnifier_source_size(60, 1), 60);
+        assert_eq!(magnifier_source_size(60, 2), 30);
+        assert_eq!(magnifier_source_size(60, 3), 20);
+        assert_eq!(magnifier_source_size(60, 4), 15);
+        assert_eq!(magnifier_source_size(60, 5), 12);
     }
 
     #[test]
@@ -2500,6 +2730,19 @@ mod tests {
     }
 
     #[test]
+    fn pointer_maps_to_the_original_source_pixel() {
+        assert_eq!(
+            map_pointer_to_source(100, 100, 800, 600, 1600, 1200),
+            Some((200, 200))
+        );
+        assert_eq!(
+            map_pointer_to_source(799, 599, 800, 600, 1600, 1200),
+            Some((1598, 1198))
+        );
+        assert_eq!(map_pointer_to_source(0, 0, 0, 600, 1600, 1200), None);
+    }
+
+    #[test]
     fn pixel_sampling_rejects_out_of_bounds_coordinates() {
         let mut data = vec![0; 2 * 2 * 4];
         data[..4].copy_from_slice(&[1, 2, 3, 4]);
@@ -2509,9 +2752,63 @@ mod tests {
     }
 
     #[test]
-    fn hex_color_uses_rgb_for_opaque_pixels() {
+    fn hex_color_is_always_opaque() {
         assert_eq!(hex_color([0x12, 0x34, 0x56, 255]), "#123456");
-        assert_eq!(hex_color([0x12, 0x34, 0x56, 0x78]), "#12345678");
+        assert_eq!(hex_color([0x12, 0x34, 0x56, 0x78]), "#123456");
+    }
+
+    #[test]
+    fn rgb_color_uses_css_syntax() {
+        assert_eq!(
+            format_color([0x12, 0x34, 0x56, 255], ColorFormat::Rgb, false),
+            "rgb(18, 52, 86)"
+        );
+        assert_eq!(
+            format_color([0x12, 0x34, 0x56, 0x78], ColorFormat::Rgb, false),
+            "rgb(18, 52, 86)"
+        );
+        assert_eq!(
+            format_color([0x12, 0x34, 0x56, 0x78], ColorFormat::Rgb, true),
+            "rgb(18,52,86)"
+        );
+    }
+
+    #[test]
+    fn hsl_color_uses_css_syntax_and_standard_conversion() {
+        assert_eq!(
+            format_color([0x12, 0x34, 0x56, 255], ColorFormat::Hsl, false),
+            "hsl(210.00, 65.38%, 20.39%)"
+        );
+        assert_eq!(
+            format_color([0x12, 0x34, 0x56, 0x78], ColorFormat::Hsl, false),
+            "hsl(210.00, 65.38%, 20.39%)"
+        );
+        assert_eq!(
+            format_color([0x12, 0x34, 0x56, 0x78], ColorFormat::Hsl, true),
+            "hsl(210.00,65.38%,20.39%)"
+        );
+        assert_eq!(
+            format_color([128, 128, 128, 255], ColorFormat::Hsl, false),
+            "hsl(0.00, 0.00%, 50.20%)"
+        );
+    }
+
+    #[test]
+    fn hsl_conversion_wraps_primary_and_secondary_hues() {
+        assert_eq!(rgb_to_hsl([255, 0, 0]), (0.0, 100.0, 50.0));
+        assert_eq!(rgb_to_hsl([0, 255, 0]), (120.0, 100.0, 50.0));
+        assert_eq!(rgb_to_hsl([0, 0, 255]), (240.0, 100.0, 50.0));
+        assert_eq!(rgb_to_hsl([255, 0, 255]), (300.0, 100.0, 50.0));
+    }
+
+    #[test]
+    fn color_badge_uses_compact_text_only_when_needed() {
+        let color = [0x12, 0x34, 0x56, 0x78];
+        let full = format_color(color, ColorFormat::Hsl, false);
+        let compact = format_color(color, ColorFormat::Hsl, true);
+        assert!(color_badge_fits((0, 0, 64, 64), 200, &full));
+        assert!(!color_badge_fits((0, 0, 64, 64), 190, &full));
+        assert!(color_badge_fits((0, 0, 64, 64), 190, &compact));
     }
 
     #[test]
@@ -2536,9 +2833,25 @@ mod tests {
     }
 
     #[test]
-    fn hex_label_glyphs_are_visible() {
-        for ch in "#0123456789ABCDEF".chars() {
-            let glyph = glyph(ch.to_ascii_lowercase());
+    fn color_label_glyphs_cover_all_supported_formats() {
+        for format in [ColorFormat::Hex, ColorFormat::Rgb, ColorFormat::Hsl] {
+            for alpha in [255, 120] {
+                let text = format_color([0x12, 0x34, 0x56, alpha], format, false);
+                for ch in text.chars().filter(|ch| *ch != ' ') {
+                    let glyph = glyph(ch.to_ascii_lowercase());
+                    assert!(
+                        glyph.iter().any(|row| *row != 0),
+                        "missing glyph for {ch} in {text}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn magnifier_hint_glyphs_are_visible() {
+        for ch in "copyexitcesc".chars() {
+            let glyph = glyph(ch);
             assert!(glyph.iter().any(|row| *row != 0), "missing glyph for {ch}");
         }
     }
